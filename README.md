@@ -67,7 +67,7 @@
 ### 4. 运行
 
 ```bash
-cd E:\CodeBuddyProjects\UCS
+cd E:\Projects\UCS
 dotnet run
 ```
 
