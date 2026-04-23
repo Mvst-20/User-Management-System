@@ -22,11 +22,14 @@ public class TokenCleanupService : BackgroundService
             {
                 using var scope = _serviceProvider.CreateScope();
                 var tokenService = scope.ServiceProvider.GetRequiredService<ITokenService>();
+                var onlineUserService = scope.ServiceProvider.GetRequiredService<IOnlineUserService>();
+
                 await tokenService.DeleteExpiredTokensAsync();
+                onlineUserService.CleanExpiredUsers();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error during token cleanup");
+                _logger.LogError(ex, "Error during cleanup");
             }
 
             await Task.Delay(_interval, stoppingToken);

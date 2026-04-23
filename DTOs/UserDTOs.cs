@@ -36,7 +36,6 @@ public record UpdateUserRequest(
 
 public record PatchUserRequest(
     string? Username = null,
-    string? Email = null,
     string? Phone = null,
     JsonElement? Extras = null
 );
@@ -81,12 +80,6 @@ public record RegisterDataResponse(
 
 public record AvatarDataResponse(
     string AvatarUrl
-);
-
-public record AdminStatsResponse(
-    int OnlineUsers,
-    int NewUsersThisWeek,
-    int ActiveUsersThisWeek
 );
 
 public record ServerStatusResponse(

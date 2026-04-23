@@ -67,6 +67,8 @@ public class EmailService : IEmailService
         string subject;
         string htmlBody;
 
+        var expiryMinutes = _config.AppSettings.TokenExpiryMinutes;
+
         if (isEmailChange && !string.IsNullOrEmpty(newEmail))
         {
             subject = "Confirm Email Change";
@@ -81,6 +83,7 @@ public class EmailService : IEmailService
 <p>You are requesting to change your email to: <strong>{newEmail}</strong></p>
 <p><a href=""{verifyUrl}"" style=""display:inline-block;background:#7b1fa2;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;"">Confirm Change</a></p>
 <p style=""color:#666;font-size:14px;"">Or copy this link: {verifyUrl}</p>
+<p style=""color:#666;font-size:13px;"">This link expires in {expiryMinutes} minutes.</p>
 <p style=""color:#e65100;font-size:13px;""><strong>Security Notice:</strong> If you did not request this, please ignore this email.</p>
 </div></body></html>";
         }
@@ -95,7 +98,7 @@ public class EmailService : IEmailService
 <div style=""max-width:600px;margin:0 auto;background:#fff;padding:30px;border-radius:8px;"">
 <h2 style=""color:#333;margin:0 0 20px;"">Verify Your Email</h2>
 <p>Hello {username},</p>
-<p>Thank you for registering. Click the button below to verify your email address (expires in 20 minutes).</p>
+<p>Thank you for registering. Click the button below to verify your email address (expires in {expiryMinutes} minutes).</p>
 <p><a href=""{verifyUrl}"" style=""display:inline-block;background:#1976d2;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;"">Verify Email</a></p>
 <p style=""color:#666;font-size:14px;"">Or copy this link: {verifyUrl}</p>
 <p style=""color:#666;font-size:13px;"">If you did not create an account, please ignore this email.</p>

@@ -19,7 +19,7 @@ public class TokenService : ITokenService
         _logger = logger;
     }
 
-    public string GenerateVerificationToken()
+    private static string GenerateVerificationToken()
     {
         var bytes = RandomNumberGenerator.GetBytes(32);
         return Convert.ToBase64String(bytes)

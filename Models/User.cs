@@ -14,8 +14,7 @@ public enum UserStatus
 public enum UserRole
 {
     User = 1,        // 普通用户
-    Admin = 2,       // 管理员
-    Guest = 3        // 访客
+    Admin = 2        // 管理员
 }
 
 public enum VerificationTokenType

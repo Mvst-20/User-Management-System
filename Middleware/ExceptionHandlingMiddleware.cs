@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using UserManagementSystem.DTOs;
 
 namespace UserManagementSystem.Middleware;
 
@@ -31,18 +32,19 @@ public class ExceptionHandlingMiddleware
     {
         context.Response.ContentType = "application/json";
 
-        var response = exception switch
+        var (statusCode, code, message) = exception switch
         {
-            ArgumentException => new { StatusCode = HttpStatusCode.BadRequest, Message = exception.Message },
-            UnauthorizedAccessException => new { StatusCode = HttpStatusCode.Unauthorized, Message = exception.Message },
-            KeyNotFoundException => new { StatusCode = HttpStatusCode.NotFound, Message = exception.Message },
-            InvalidOperationException => new { StatusCode = HttpStatusCode.BadRequest, Message = exception.Message },
-            _ => new { StatusCode = HttpStatusCode.InternalServerError, Message = "An unexpected error occurred" }
+            ArgumentException => (HttpStatusCode.BadRequest, ResultCodes.ValidationError, exception.Message),
+            UnauthorizedAccessException => (HttpStatusCode.Unauthorized, ResultCodes.Unauthorized, exception.Message),
+            KeyNotFoundException => (HttpStatusCode.NotFound, ResultCodes.NotFound, exception.Message),
+            InvalidOperationException => (HttpStatusCode.BadRequest, ResultCodes.Error, exception.Message),
+            _ => (HttpStatusCode.InternalServerError, ResultCodes.InternalServerError, "An unexpected error occurred")
         };
 
-        context.Response.StatusCode = (int)response.StatusCode;
+        context.Response.StatusCode = (int)statusCode;
 
-        var jsonResponse = JsonSerializer.Serialize(new { error = response.Message });
+        var response = new ApiResponse(code, message);
+        var jsonResponse = JsonSerializer.Serialize(response);
         await context.Response.WriteAsync(jsonResponse);
     }
 }

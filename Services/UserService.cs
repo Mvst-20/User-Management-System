@@ -100,24 +100,9 @@ public class UserService : IUserService
         return (users, totalCount);
     }
 
-    public void MarkUserOnline(string userId)
-    {
-        _onlineUserService.MarkUserOnline(userId);
-    }
-
-    public void MarkUserOffline(string userId)
-    {
-        _onlineUserService.MarkUserOffline(userId);
-    }
-
     public int GetOnlineUsersCount()
     {
         return _onlineUserService.GetOnlineUsersCount();
-    }
-
-    public Task<int> GetOnlineUsersCountAsync()
-    {
-        return Task.FromResult(GetOnlineUsersCount());
     }
 
     public async Task<int> GetNewUsersCountAsync(int days)

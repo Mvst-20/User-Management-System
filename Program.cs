@@ -116,9 +116,22 @@ builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
+        var allowedOrigins = appConfig.AppSettings.AllowedOrigins;
+        if (!string.IsNullOrEmpty(allowedOrigins))
+        {
+            var origins = allowedOrigins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            policy.WithOrigins(origins)
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        }
+        else
+        {
+            // 开发环境默认允许所有来源
+            policy.AllowAnyOrigin()
+                  .AllowAnyMethod()
+                  .AllowAnyHeader();
+        }
     });
 });
 
@@ -144,12 +157,14 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+app.UseStaticFiles(); // 提供头像等静态文件
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 
 // ============ 映射端点 ============
 
+// 公开固定路由优先注册（避免与 {id} 参数路由冲突）
 app.MapUserEndpoints();
 app.MapAvatarEndpoints();
 app.MapAdminEndpoints();

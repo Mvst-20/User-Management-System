@@ -31,4 +31,5 @@ public class AppSettings
     public string ApiBaseUrl { get; set; } = string.Empty;
     public int TokenExpiryMinutes { get; set; } = 20;
     public int AdminPasswordLength { get; set; } = 12;
+    public string AllowedOrigins { get; set; } = string.Empty; // 逗号分隔的允许跨域来源，为空则允许所有
 }

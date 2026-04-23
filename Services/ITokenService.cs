@@ -4,7 +4,6 @@ namespace UserManagementSystem.Services;
 
 public interface ITokenService
 {
-    string GenerateVerificationToken();
     Task<EmailVerificationToken?> GetVerificationTokenAsync(string token);
     Task<EmailVerificationToken> CreateVerificationTokenAsync(ulong userId, VerificationTokenType type, string? newEmail = null);
     Task DeleteVerificationTokenAsync(ulong tokenId);

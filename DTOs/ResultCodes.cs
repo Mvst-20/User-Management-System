@@ -22,8 +22,7 @@ public static class ResultCodes
 
     // ============ 登录相关 (2xx) ============
     public const int LoginSuccess = 200;             // 登录成功
-    public const int LoginFail_UserNotFound = 201;   // 用户不存在
-    public const int LoginFail_WrongPassword = 202;  // 密码错误
+    public const int LoginFail_UserNotFound = 201;   // 用户不存在或密码错误
     public const int LoginFail_AccountDeleted = 203; // 账号已注销
     public const int LoginFail_AccountBanned = 204;  // 账号已被封禁
 

@@ -5,6 +5,7 @@ public interface IOnlineUserService
     void MarkUserOnline(string userId);
     void MarkUserOffline(string userId);
     int GetOnlineUsersCount();
+    void CleanExpiredUsers(TimeSpan? timeout = null);
 }
 
 public class OnlineUserService : IOnlineUserService

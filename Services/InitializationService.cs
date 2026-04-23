@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using UserManagementSystem.Configuration;
 using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Services;
@@ -19,6 +20,7 @@ public class InitializationService : IHostedService
         using var scope = _serviceProvider.CreateScope();
         var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
         var consoleService = scope.ServiceProvider.GetRequiredService<IConsoleService>();
+        var appConfig = scope.ServiceProvider.GetRequiredService<AppConfiguration>();
         var context = scope.ServiceProvider.GetRequiredService<Data.ApplicationDbContext>();
 
         // 确保数据库已创建
@@ -28,7 +30,7 @@ public class InitializationService : IHostedService
         // 检查并创建初始管理员账户
         if (!await userService.HasAdminAsync())
         {
-            var adminPassword = GenerateRandomPassword(12);
+            var adminPassword = GenerateRandomPassword(appConfig.AppSettings.AdminPasswordLength);
             var adminUser = new User
             {
                 Username = "admin",
