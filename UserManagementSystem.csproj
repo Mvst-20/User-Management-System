@@ -4,6 +4,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- EF Core 和 Data Annotations 不完全兼容 trimming，抑制相关警告 -->
+    <NoWarn>$(NoWarn);IL3050;IL2026</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

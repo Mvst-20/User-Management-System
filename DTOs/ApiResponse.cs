@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace UserManagementSystem.DTOs;
 
@@ -77,4 +78,10 @@ public class PagedApiResponse
         TotalCount = totalCount;
         TotalPages = (int)Math.Ceiling((double)totalCount / pageSize);
     }
+}
+
+[JsonSerializable(typeof(ApiResponse))]
+[JsonSerializable(typeof(PagedApiResponse))]
+internal partial class AppJsonSerializerContext : JsonSerializerContext
+{
 }

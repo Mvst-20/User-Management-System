@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
 
@@ -8,12 +9,14 @@ public static class UserExtensions
 {
     public static UserResponse ToResponse(this User user)
     {
-        System.Text.Json.JsonElement? extras = null;
+        JsonElement? extras = null;
         if (!string.IsNullOrEmpty(user.Extras))
         {
             try
             {
-                extras = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(user.Extras);
+                // 使用 JsonDocument.Parse 替代 Deserialize，避免 trim 警告
+                using var doc = JsonDocument.Parse(user.Extras);
+                extras = doc.RootElement.Clone();
             }
             catch { }
         }

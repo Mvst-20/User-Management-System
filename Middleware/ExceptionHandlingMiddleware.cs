@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using UserManagementSystem.DTOs;
 
 namespace UserManagementSystem.Middleware;
@@ -49,7 +50,7 @@ public class ExceptionHandlingMiddleware
         context.Response.StatusCode = (int)statusCode;
 
         var response = new ApiResponse(code, displayMessage);
-        var jsonResponse = JsonSerializer.Serialize(response);
+        var jsonResponse = JsonSerializer.Serialize(response, AppJsonSerializerContext.Default.ApiResponse);
         await context.Response.WriteAsync(jsonResponse);
     }
 }
