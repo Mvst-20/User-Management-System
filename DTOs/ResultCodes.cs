@@ -13,6 +13,7 @@ public static class ResultCodes
     public const int Forbidden = 4;                  // 禁止访问
     public const int NotFound = 5;                  // 资源不存在
     public const int InternalServerError = 6;       // 服务器内部错误
+    public const int TooManyRequests = 7;           // 请求过于频繁
 
     // ============ 用户注册相关 (1xx) ============
     public const int RegisterSuccess = 100;          // 注册成功

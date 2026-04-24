@@ -21,10 +21,7 @@ public class InitializationService : IHostedService
         var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
         var consoleService = scope.ServiceProvider.GetRequiredService<IConsoleService>();
         var appConfig = scope.ServiceProvider.GetRequiredService<AppConfiguration>();
-        var context = scope.ServiceProvider.GetRequiredService<Data.ApplicationDbContext>();
 
-        // 确保数据库已创建
-        await context.Database.EnsureCreatedAsync(cancellationToken);
         consoleService.PrintInfo("Database", "Connected successfully");
 
         // 检查并创建初始管理员账户
@@ -35,7 +32,7 @@ public class InitializationService : IHostedService
             {
                 Username = "admin",
                 Email = "admin@system.local",
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword),
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword, 12),
                 Role = UserRole.Admin,
                 Status = UserStatus.Normal,
                 EmailVerifiedAt = DateTime.UtcNow,
@@ -61,7 +58,7 @@ Password is masked in log file, keep it safe.
 ================================================================================
 ";
 
-            await File.AppendAllTextAsync(logPath, logContent);
+            await File.AppendAllTextAsync(logPath, logContent, cancellationToken);
 
             consoleService.PrintInitSuccess("admin", "admin@system.local", adminPassword);
         }

@@ -2,7 +2,6 @@ using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using UserManagementSystem.Configuration;
@@ -13,8 +12,14 @@ using UserManagementSystem.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Suppress ASP.NET Core console noise during startup
-builder.Logging.SetMinimumLevel(LogLevel.Warning);
+// ============ Kestrel 服务器配置 ============
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10MB 请求体大小限制
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
+});
 
 // ============ 配置绑定 ============
 
@@ -27,7 +32,20 @@ builder.Configuration.GetSection("AppSettings").Bind(appConfig.AppSettings);
 
 var connectionString = builder.Configuration.GetConnectionString("Default");
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
+{
+    options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString), mySqlOptions =>
+    {
+        mySqlOptions.EnableRetryOnFailure(
+            maxRetryCount: 3,
+            maxRetryDelay: TimeSpan.FromSeconds(10),
+            errorNumbersToAdd: null);
+    });
+    // 生产环境关闭敏感数据日志
+    if (builder.Environment.IsDevelopment())
+    {
+        options.EnableSensitiveDataLogging();
+    }
+});
 
 // ============ 服务注册 ============
 
@@ -69,7 +87,7 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy("AdminOnly", policy => 
+    options.AddPolicy("AdminOnly", policy =>
         policy.RequireRole("Admin"));
 });
 
@@ -78,9 +96,9 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo 
-    { 
-        Title = "User Management API", 
+    c.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "User Management API",
         Version = "v1",
         Description = "用户管理系统 API"
     });
@@ -141,6 +159,20 @@ var app = builder.Build();
 
 var consoleService = app.Services.GetRequiredService<IConsoleService>();
 consoleService.PrintBanner();
+
+// ============ 数据库初始化/迁移 ============
+
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+    if (app.Environment.IsDevelopment() || !await context.Database.CanConnectAsync())
+    {
+        // 开发环境或首次运行：确保数据库已创建
+        await context.Database.EnsureCreatedAsync();
+    }
+    // 生产环境使用 Migrations：运行 dotnet ef database update
+}
 
 // ============ 中间件配置 ============
 

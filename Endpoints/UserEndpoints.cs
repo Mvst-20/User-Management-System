@@ -24,8 +24,21 @@ public static class UserEndpoints
             [FromServices] ITokenService tokenService,
             [FromServices] IEmailService emailService,
             [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] IMemoryCache cache,
             [FromServices] ILogger<Program> logger) =>
         {
+            // 注册速率限制（同一IP每分钟最多5次）
+            var rateLimitKey = $"register_rate_{request.Email}";
+            var registrationCount = 0;
+            if (cache.TryGetValue(rateLimitKey, out int count))
+            {
+                registrationCount = count;
+            }
+            if (registrationCount >= 5)
+            {
+                return Results.StatusCode(429);
+            }
+
             // 检查用户名是否已存在
             if (await userService.GetByUsernameAsync(request.Username) != null)
             {
@@ -38,12 +51,12 @@ public static class UserEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "邮箱已被注册"));
             }
 
-            // 创建用户
+            // 创建用户（BCrypt work factor 12）
             var user = new User
             {
                 Username = request.Username,
                 Email = request.Email,
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password, 12),
                 Status = UserStatus.Unverified,
                 Role = UserRole.User,
                 CreatedAt = DateTime.UtcNow,
@@ -56,17 +69,26 @@ public static class UserEndpoints
             var token = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
 
             // 发送验证邮件
+            bool emailSent = true;
             try
             {
                 await emailService.SendVerificationEmailAsync(user.Email, user.Username, token.Token);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to send verification email");
+                emailSent = false;
+                logger.LogError(ex, "Failed to send verification email to {Email}", user.Email);
             }
 
-            return Results.Ok(new ApiResponse(ResultCodes.RegisterSuccess, "注册成功，请查收验证邮件", 
-                new RegisterDataResponse(user.Email)));
+            // 更新速率限制
+            cache.Set(rateLimitKey, registrationCount + 1, TimeSpan.FromMinutes(1));
+
+            var message = emailSent
+                ? "注册成功，请查收验证邮件"
+                : "注册成功，但验证邮件发送失败，请稍后重新发送验证邮件";
+
+            return Results.Ok(new ApiResponse(ResultCodes.RegisterSuccess, message,
+                new RegisterDataResponse(user.Email, emailSent)));
         });
 
         // 用户登录
@@ -94,6 +116,12 @@ public static class UserEndpoints
             if (user.Status == UserStatus.Banned)
             {
                 return Results.Forbid();
+            }
+
+            // 未验证用户提示
+            if (user.Status == UserStatus.Unverified)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountBanned, "账号未验证，请先验证邮箱"));
             }
 
             // 更新最后登录信息
@@ -429,7 +457,7 @@ public static class UserEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangePasswordFail_SamePassword, "新密码不能与当前密码相同"));
             }
 
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
+            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword, 12);
             await userService.UpdateUserAsync(user);
 
             return Results.Ok(new ApiResponse(ResultCodes.ChangePasswordSuccess, "密码修改成功"));
@@ -482,18 +510,18 @@ public static class UserEndpoints
 
             // 生成验证Token
             var token = await tokenService.CreateVerificationTokenAsync(
-                id, 
-                VerificationTokenType.EmailChange, 
+                id,
+                VerificationTokenType.EmailChange,
                 request.NewEmail);
 
             // 发送验证邮件
             try
             {
                 await emailService.SendVerificationEmailAsync(
-                    request.NewEmail, 
-                    user.Username, 
-                    token.Token, 
-                    true, 
+                    request.NewEmail,
+                    user.Username,
+                    token.Token,
+                    true,
                     request.NewEmail);
             }
             catch (Exception ex)
