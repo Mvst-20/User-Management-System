@@ -57,7 +57,9 @@ builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddSingleton<IJwtService, JwtService>();
+builder.Services.AddSingleton<ITokenBlacklistService, TokenBlacklistService>();
 builder.Services.AddSingleton<IConsoleService, ConsoleService>();
+builder.Services.AddScoped<IPermissionService, PermissionService>();
 
 // 后台服务
 builder.Services.AddHostedService<InitializationService>();
@@ -83,13 +85,27 @@ builder.Services.AddAuthentication(options =>
         IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(appConfig.Jwt.Key)),
         ClockSkew = TimeSpan.Zero
     };
+
+    // Token 黑名单检查
+    options.Events = new JwtBearerEvents
+    {
+        OnTokenValidated = context =>
+        {
+            var jti = context.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+            if (jti != null)
+            {
+                var blacklistService = context.HttpContext.RequestServices.GetRequiredService<ITokenBlacklistService>();
+                if (blacklistService.IsBlacklisted(jti))
+                {
+                    context.Fail("Token has been revoked");
+                }
+            }
+            return Task.CompletedTask;
+        }
+    };
 });
 
-builder.Services.AddAuthorization(options =>
-{
-    options.AddPolicy("AdminOnly", policy =>
-        policy.RequireRole("Admin"));
-});
+builder.Services.AddAuthorization();
 
 // ============ Swagger 配置 ============
 
@@ -143,10 +159,17 @@ builder.Services.AddCors(options =>
                   .AllowAnyHeader()
                   .AllowCredentials();
         }
+        else if (builder.Environment.IsDevelopment())
+        {
+            // 仅开发环境允许所有来源
+            policy.AllowAnyOrigin()
+                  .AllowAnyMethod()
+                  .AllowAnyHeader();
+        }
         else
         {
-            // 开发环境默认允许所有来源
-            policy.AllowAnyOrigin()
+            // 生产环境无配置时仅允许同源
+            policy.SetIsOriginAllowed(_ => false)
                   .AllowAnyMethod()
                   .AllowAnyHeader();
         }
@@ -200,6 +223,8 @@ app.UseAuthorization();
 app.MapUserEndpoints();
 app.MapAvatarEndpoints();
 app.MapAdminEndpoints();
+app.MapPermissionEndpoints();
+app.MapUserGroupEndpoints();
 
 // 健康检查端点
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));

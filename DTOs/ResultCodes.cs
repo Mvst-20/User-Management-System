@@ -26,6 +26,8 @@ public static class ResultCodes
     public const int LoginFail_UserNotFound = 201;   // 用户不存在或密码错误
     public const int LoginFail_AccountDeleted = 203; // 账号已注销
     public const int LoginFail_AccountBanned = 204;  // 账号已被封禁
+    public const int LoginFail_RateLimited = 205;    // 登录尝试过于频繁
+    public const int AccountBanned = 206;            // 账号已被封禁
 
     // ============ 邮箱验证相关 (3xx) ============
     public const int EmailVerifySuccess = 300;       // 邮箱验证成功
@@ -81,4 +83,31 @@ public static class ResultCodes
     // ============ 邮件发送相关 (9xx) ============
     public const int EmailSendSuccess = 900;           // 邮件发送成功
     public const int EmailSendFail = 901;              // 邮件发送失败
+
+    // ============ 权限相关 (10xx) ============
+    public const int PermissionDenied = 1000;              // 权限不足
+    public const int PermissionNotFound = 1001;            // 权限不存在
+    public const int PermissionCodeExists = 1002;          // 权限代码已存在
+    public const int PermissionCreateSuccess = 1010;       // 创建权限成功
+    public const int PermissionUpdateSuccess = 1011;       // 更新权限成功
+    public const int PermissionDeleteSuccess = 1012;       // 删除权限成功
+    public const int PermissionCannotModifySpecial = 1013; // 不能修改或删除特殊权限
+
+    // ============ 用户组相关 (11xx) ============
+    public const int UserGroupNotFound = 1100;                 // 用户组不存在
+    public const int UserGroupNameExists = 1101;               // 用户组名称已存在
+    public const int UserGroupCreateSuccess = 1110;            // 创建用户组成功
+    public const int UserGroupUpdateSuccess = 1111;            // 更新用户组成功
+    public const int UserGroupDeleteSuccess = 1112;            // 删除用户组成功
+    public const int UserGroupProtected = 1113;                // 受保护的用户组不可删除或编辑
+    public const int UserGroupMemberExists = 1120;             // 用户已是该组成员
+    public const int UserGroupMemberNotFound = 1121;           // 用户不是该组成员
+    public const int UserGroupMemberAddSuccess = 1122;         // 添加成员成功
+    public const int UserGroupMemberRemoveSuccess = 1123;      // 移除成员成功
+    public const int UserGroupMemberLocked = 1124;             // 用户组成员锁定，不可修改
+    public const int UserGroupPermissionSetSuccess = 1130;     // 设置权限成功
+    public const int PermissionAPermissionRestricted = 1131;   // A权限不可分配给非初始用户组
+    public const int UserGroupNotFoundById = 1140;             // 用户组ID不存在
+    public const int PermissionCheckSuccess = 1150;            // 权限检查完成
+    public const int UserGroupExtrasUpdateSuccess = 1160;      // 用户组扩展字段更新成功
 }

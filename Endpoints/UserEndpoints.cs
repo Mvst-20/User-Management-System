@@ -13,9 +13,7 @@ public static class UserEndpoints
 {
     public static void MapUserEndpoints(this WebApplication app)
     {
-        var appConfig = app.Services.GetRequiredService<AppConfiguration>();
-
-        // ============ 公开端点 ============
+        // ============ 公开端点（不需要权限检查）============
 
         // 用户注册
         app.MapPost("/api/users/register", async (
@@ -24,10 +22,11 @@ public static class UserEndpoints
             [FromServices] ITokenService tokenService,
             [FromServices] IEmailService emailService,
             [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] IPermissionService permissionService,
             [FromServices] IMemoryCache cache,
             [FromServices] ILogger<Program> logger) =>
         {
-            // 注册速率限制（同一IP每分钟最多5次）
+            // 注册速率限制（同一邮箱每分钟最多5次）
             var rateLimitKey = $"register_rate_{request.Email}";
             var registrationCount = 0;
             if (cache.TryGetValue(rateLimitKey, out int count))
@@ -36,22 +35,22 @@ public static class UserEndpoints
             }
             if (registrationCount >= 5)
             {
-                return Results.StatusCode(429);
+                return Results.Json(new ApiResponse(ResultCodes.TooManyRequests, "请求过于频繁，请稍后再试"), statusCode: 429);
             }
 
-            // 检查用户名是否已存在
-            if (await userService.GetByUsernameAsync(request.Username) != null)
+            // 检查用户名是否已存在（排除已软删除用户）
+            if (await userService.ActiveUsernameExistsAsync(request.Username))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_UsernameExists, "用户名已存在"));
             }
 
-            // 检查邮箱是否已存在
-            if (await userService.GetByEmailAsync(request.Email) != null)
+            // 检查邮箱是否已存在（排除已软删除用户）
+            if (await userService.ActiveEmailExistsAsync(request.Email))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "邮箱已被注册"));
             }
 
-            // 创建用户（BCrypt work factor 12）
+            // 创建用户
             var user = new User
             {
                 Username = request.Username,
@@ -64,6 +63,13 @@ public static class UserEndpoints
             };
 
             await userService.CreateUserAsync(user);
+
+            // 自动加入"普通用户"组
+            var normalGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.NormalGroupName);
+            if (normalGroup != null)
+            {
+                await permissionService.AddMemberAsync(normalGroup.Id, user.Id);
+            }
 
             // 生成验证Token
             var token = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
@@ -97,28 +103,50 @@ public static class UserEndpoints
             [FromServices] IUserService userService,
             [FromServices] IJwtService jwtService,
             [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] IMemoryCache cache,
+            [FromServices] AppConfiguration appConfig,
             HttpContext context) =>
         {
-            var user = await userService.ValidateCredentialsAsync(request.Login, request.Password);
+            // 登录暴力破解防护：基于 IP + 登录标识限流
+            var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var loginKey = request.Login ?? string.Empty;
+            var ipKey = $"login_ip_{clientIp}";
+            var accountKey = $"login_account_{loginKey}";
+
+            // IP 限流：同一 IP 5 分钟内最多 20 次失败
+            var ipFails = 0;
+            if (cache.TryGetValue(ipKey, out int ipCount))
+                ipFails = ipCount;
+            if (ipFails >= 20)
+                return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
+
+            // 账号限流：同一账号 5 分钟内最多 5 次失败
+            var accountFails = 0;
+            if (cache.TryGetValue(accountKey, out int accountCount))
+                accountFails = accountCount;
+            if (accountFails >= 5)
+                return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
+
+            var user = await userService.ValidateCredentialsAsync(request.Login ?? string.Empty, request.Password);
 
             if (user == null)
             {
+                // 登录失败，递增计数
+                cache.Set(ipKey, ipFails + 1, TimeSpan.FromMinutes(5));
+                cache.Set(accountKey, accountFails + 1, TimeSpan.FromMinutes(5));
                 return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_UserNotFound, "用户名或密码错误"));
             }
 
-            // 软删除用户不能登录
             if (user.Status == UserStatus.Deleted)
             {
                 return Results.NotFound(new ApiResponse(ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销"));
             }
 
-            // 封禁用户不能登录
             if (user.Status == UserStatus.Banned)
             {
-                return Results.Forbid();
+                return Results.Json(new ApiResponse(ResultCodes.LoginFail_AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
-            // 未验证用户提示
             if (user.Status == UserStatus.Unverified)
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountBanned, "账号未验证，请先验证邮箱"));
@@ -189,7 +217,6 @@ public static class UserEndpoints
             [FromServices] IMemoryCache cache,
             [FromServices] ILogger<Program> logger) =>
         {
-            // 检查频率限制
             var cacheKey = $"resend_verification_{request.Email}";
             if (cache.TryGetValue(cacheKey, out _))
             {
@@ -208,7 +235,6 @@ public static class UserEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ResendVerificationFail_AlreadyVerified, "该用户无需验证"));
             }
 
-            // 始终创建新Token并重新发送（旧Token会被CreateVerificationTokenAsync自动删除）
             var newToken = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
             try
             {
@@ -220,15 +246,14 @@ public static class UserEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.EmailSendFail, "邮件发送失败"));
             }
 
-            // 设置频率限制缓存（1分钟）
             cache.Set(cacheKey, true, TimeSpan.FromMinutes(1));
 
             return Results.Ok(new ApiResponse(ResultCodes.ResendVerificationSuccess, "验证邮件已发送"));
         });
 
-        // ============ 需要认证的端点 ============
+        // ============ 需要认证和权限的端点 ============
 
-        // 获取单个用户信息
+        // 获取单个用户信息（允许查看自己，查看他人需要 user:read 权限）
         app.MapGet("/api/users/{id}", async (
             ulong id,
             [FromServices] IUserService userService) =>
@@ -241,16 +266,16 @@ public static class UserEndpoints
             }
 
             return Results.Ok(new ApiResponse(ResultCodes.GetUserSuccess, "获取成功", user.ToResponse()));
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserRead, allowSelf: true);
 
-        // 完全更新用户信息
+        // 完全更新用户信息（允许更新自己，更新他人需要 user:update 权限）
         app.MapPut("/api/users/{id}", async (
             ulong id,
             [FromBody] UpdateUserRequest request,
             [FromServices] IUserService userService,
+            [FromServices] IPermissionService permissionService,
             HttpContext httpContext) =>
         {
-            var currentUser = httpContext.User;
             var user = await userService.GetByIdAsync(id);
 
             if (user == null || user.Status == UserStatus.Deleted)
@@ -258,57 +283,53 @@ public static class UserEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
             }
 
-            // 权限检查
-            if (!currentUser.IsOwnResource(id) && !currentUser.IsAdmin())
+            if (user.Status == UserStatus.Banned)
             {
-                return Results.StatusCode(403);
+                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
-            // 状态检查
-            if (user.Status == UserStatus.Banned || user.Status == UserStatus.Deleted)
-            {
-                return Results.StatusCode(403);
-            }
-
-            // 检查用户名唯一性
+            // 检查用户名唯一性（排除已软删除用户）
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
             {
-                if (await userService.GetByUsernameAsync(request.Username) != null)
+                if (await userService.ActiveUsernameExistsAsync(request.Username))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名已存在"));
                 }
                 user.Username = request.Username;
             }
 
-            // 检查邮箱唯一性 - 非管理员不能直接修改邮箱
+            // 只有管理员（拥有 user:update 权限操作他人时）可以修改他人邮箱
             if (!string.IsNullOrEmpty(request.Email) && request.Email != user.Email)
             {
-                if (!currentUser.IsAdmin())
+                if (httpContext.User.IsOwnResource(id))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_Forbidden, "请使用修改邮箱接口变更邮箱"));
                 }
-                if (await userService.GetByEmailAsync(request.Email) != null)
+                if (await userService.ActiveEmailExistsAsync(request.Email))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_EmailExists, "邮箱已被使用"));
                 }
                 user.Email = request.Email;
-                user.EmailVerifiedAt = null; // 管理员直接修改邮箱也需重新验证
+                user.EmailVerifiedAt = null;
             }
 
             if (request.Phone != null)
             {
-                var existingUser = await userService.GetByPhoneAsync(request.Phone);
-                if (existingUser != null && existingUser.Id != id)
+                if (await userService.ActivePhoneExistsAsync(request.Phone, id))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_PhoneExists, "手机号已被使用"));
                 }
                 user.Phone = request.Phone;
             }
 
-            // 只有管理员可以修改角色
-            if (request.Role.HasValue && currentUser.IsAdmin())
+            // 角色变更是敏感操作，需要 user:delete 权限
+            if (request.Role.HasValue)
             {
-                user.Role = (UserRole)request.Role.Value;
+                var currentUserId = httpContext.User.GetUserId()!.Value;
+                if (await permissionService.HasPermissionAsync(currentUserId, PermissionCodes.UserDelete))
+                {
+                    user.Role = (UserRole)request.Role.Value;
+                }
             }
 
             if (request.Extras.HasValue)
@@ -319,16 +340,14 @@ public static class UserEndpoints
             await userService.UpdateUserAsync(user);
 
             return Results.Ok(new ApiResponse(ResultCodes.UpdateUserSuccess, "更新成功", user.ToResponse()));
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserUpdate, allowSelf: true);
 
         // 部分更新用户信息
         app.MapPatch("/api/users/{id}", async (
             ulong id,
             [FromBody] PatchUserRequest request,
-            [FromServices] IUserService userService,
-            HttpContext httpContext) =>
+            [FromServices] IUserService userService) =>
         {
-            var currentUser = httpContext.User;
             var user = await userService.GetByIdAsync(id);
 
             if (user == null || user.Status == UserStatus.Deleted)
@@ -336,19 +355,14 @@ public static class UserEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
             }
 
-            if (!currentUser.IsOwnResource(id) && !currentUser.IsAdmin())
+            if (user.Status == UserStatus.Banned)
             {
-                return Results.StatusCode(403);
-            }
-
-            if (user.Status == UserStatus.Banned || user.Status == UserStatus.Deleted)
-            {
-                return Results.StatusCode(403);
+                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
             {
-                if (await userService.GetByUsernameAsync(request.Username) != null)
+                if (await userService.ActiveUsernameExistsAsync(request.Username))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名已存在"));
                 }
@@ -357,8 +371,7 @@ public static class UserEndpoints
 
             if (request.Phone != null)
             {
-                var existingUser = await userService.GetByPhoneAsync(request.Phone);
-                if (existingUser != null && existingUser.Id != id)
+                if (await userService.ActivePhoneExistsAsync(request.Phone, id))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_PhoneExists, "手机号已被使用"));
                 }
@@ -373,20 +386,14 @@ public static class UserEndpoints
             await userService.UpdateUserAsync(user);
 
             return Results.Ok(new ApiResponse(ResultCodes.UpdateUserSuccess, "更新成功", user.ToResponse()));
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserUpdate, allowSelf: true);
 
-        // 软删除用户（仅管理员）
+        // 软删除用户（需要 user:delete 权限）
         app.MapDelete("/api/users/{id}", async (
             ulong id,
             [FromServices] IUserService userService,
-            [FromServices] IOnlineUserService onlineUserService,
-            HttpContext httpContext) =>
+            [FromServices] IOnlineUserService onlineUserService) =>
         {
-            if (!httpContext.User.IsAdmin())
-            {
-                return Results.StatusCode(403);
-            }
-
             var result = await userService.DeleteUserAsync(id);
 
             if (!result)
@@ -394,13 +401,12 @@ public static class UserEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.DeleteUserFail_NotFound, "用户不存在"));
             }
 
-            // 标记用户离线
             onlineUserService.MarkUserOffline(id.ToString());
 
             return Results.Ok(new ApiResponse(ResultCodes.DeleteUserSuccess, "用户已删除"));
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserDelete);
 
-        // 分页查询用户列表（仅管理员）
+        // 分页查询用户列表（需要 user:list 权限）
         app.MapGet("/api/users", async (
             [FromServices] IUserService userService,
             [FromQuery] int page = 1,
@@ -409,30 +415,36 @@ public static class UserEndpoints
             [FromQuery] int? role = null,
             [FromQuery] string? search = null) =>
         {
+            // pageSize 上限保护
+            if (pageSize < 1) pageSize = 1;
+            if (pageSize > 100) pageSize = 100;
+            if (page < 1) page = 1;
+
             var (users, totalCount) = await userService.GetUsersAsync(page, pageSize, status, role, search);
 
             var response = new PagedApiResponse(
-                ResultCodes.GetUsersSuccess,
-                "获取成功",
+                ResultCodes.GetUsersSuccess, "获取成功",
                 users.Select(u => (object)u.ToResponse()).ToList(),
-                page,
-                pageSize,
-                totalCount
+                page, pageSize, totalCount
             );
 
             return Results.Ok(response);
-        }).RequireAuthorization("AdminOnly");
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserList);
 
-        // 修改密码
+        // 修改密码（仅限本人操作）
         app.MapPost("/api/users/{id}/change-password", async (
             ulong id,
             [FromBody] ChangePasswordRequest request,
             [FromServices] IUserService userService,
+            [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] ITokenBlacklistService tokenBlacklistService,
+            [FromServices] AppConfiguration appConfig,
             HttpContext httpContext) =>
         {
+            // 密码修改仅限本人，不允许管理员代操作
             if (!httpContext.User.IsOwnResource(id))
             {
-                return Results.StatusCode(403);
+                return Results.Json(new ApiResponse(ResultCodes.Forbidden, "禁止访问"), statusCode: 403);
             }
 
             var user = await userService.GetByIdAsync(id);
@@ -442,9 +454,9 @@ public static class UserEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
             }
 
-            if (user.Status == UserStatus.Banned || user.Status == UserStatus.Deleted)
+            if (user.Status == UserStatus.Banned)
             {
-                return Results.StatusCode(403);
+                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
             if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash))
@@ -460,10 +472,20 @@ public static class UserEndpoints
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword, 12);
             await userService.UpdateUserAsync(user);
 
-            return Results.Ok(new ApiResponse(ResultCodes.ChangePasswordSuccess, "密码修改成功"));
-        }).RequireAuthorization();
+            // 标记用户离线
+            onlineUserService.MarkUserOffline(id.ToString());
 
-        // 申请修改邮箱
+            // 撤销当前 Token，强制重新登录
+            var jti = httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+            if (jti != null)
+            {
+                tokenBlacklistService.Blacklist(jti, DateTime.UtcNow.AddMinutes(appConfig.Jwt.ExpiryMinutes));
+            }
+
+            return Results.Ok(new ApiResponse(ResultCodes.ChangePasswordSuccess, "密码修改成功，请重新登录"));
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserChangePassword);
+
+        // 申请修改邮箱（仅限本人操作）
         app.MapPost("/api/users/{id}/change-email", async (
             ulong id,
             [FromBody] ChangeEmailRequest request,
@@ -473,9 +495,10 @@ public static class UserEndpoints
             HttpContext httpContext,
             [FromServices] ILogger<Program> logger) =>
         {
+            // 邮箱修改仅限本人
             if (!httpContext.User.IsOwnResource(id))
             {
-                return Results.StatusCode(403);
+                return Results.Json(new ApiResponse(ResultCodes.Forbidden, "禁止访问"), statusCode: 403);
             }
 
             var user = await userService.GetByIdAsync(id);
@@ -485,44 +508,33 @@ public static class UserEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
             }
 
-            if (user.Status == UserStatus.Banned || user.Status == UserStatus.Deleted)
+            if (user.Status == UserStatus.Banned)
             {
-                return Results.StatusCode(403);
+                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
-            // 检查是否与旧邮箱相同
             if (request.NewEmail == user.Email)
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_SameEmail, "新邮箱与旧邮箱相同"));
             }
 
-            // 验证密码
             if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_WrongPassword, "密码错误"));
             }
 
-            // 检查新邮箱唯一性
-            if (await userService.GetByEmailAsync(request.NewEmail) != null)
+            if (await userService.ActiveEmailExistsAsync(request.NewEmail))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_EmailExists, "该邮箱已被使用"));
             }
 
-            // 生成验证Token
             var token = await tokenService.CreateVerificationTokenAsync(
-                id,
-                VerificationTokenType.EmailChange,
-                request.NewEmail);
+                id, VerificationTokenType.EmailChange, request.NewEmail);
 
-            // 发送验证邮件
             try
             {
                 await emailService.SendVerificationEmailAsync(
-                    request.NewEmail,
-                    user.Username,
-                    token.Token,
-                    true,
-                    request.NewEmail);
+                    request.NewEmail, user.Username, token.Token, true, request.NewEmail);
             }
             catch (Exception ex)
             {
@@ -531,9 +543,9 @@ public static class UserEndpoints
             }
 
             return Results.Ok(new ApiResponse(ResultCodes.ChangeEmailRequestSuccess, "验证邮件已发送到新邮箱，请查收"));
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserChangeEmail);
 
-        // 确认修改邮箱
+        // 确认修改邮箱（公开端点，通过 token 验证）
         app.MapGet("/api/users/verify-email-change", async (
             [FromQuery] string token,
             [FromServices] IUserService userService,
@@ -566,20 +578,17 @@ public static class UserEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailConfirmFail_NoNewEmail, "无效的新邮箱地址"));
             }
 
-            // 更新用户邮箱前再次检查新邮箱唯一性
-            var existingUser = await userService.GetByEmailAsync(verificationToken.NewEmail);
-            if (existingUser != null)
+            var existingUser = await userService.ActiveEmailExistsAsync(verificationToken.NewEmail);
+            if (existingUser)
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_EmailExists, "该邮箱已被其他用户使用"));
             }
 
-            // 更新用户邮箱
             var user = verificationToken.User;
             user.Email = verificationToken.NewEmail;
             user.EmailVerifiedAt = DateTime.UtcNow;
             await userService.UpdateUserAsync(user);
 
-            // 删除Token
             await tokenService.DeleteVerificationTokenAsync(verificationToken.Id);
 
             return Results.Ok(new ApiResponse(ResultCodes.ChangeEmailConfirmSuccess, "邮箱修改成功"));
@@ -588,6 +597,8 @@ public static class UserEndpoints
         // 用户登出
         app.MapPost("/api/users/logout", (
             [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] ITokenBlacklistService tokenBlacklistService,
+            [FromServices] AppConfiguration appConfig,
             HttpContext httpContext) =>
         {
             var userId = httpContext.User.GetUserId();
@@ -595,7 +606,15 @@ public static class UserEndpoints
             {
                 onlineUserService.MarkUserOffline(userId.Value.ToString());
             }
+
+            // 撤销当前 Token
+            var jti = httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+            if (jti != null)
+            {
+                tokenBlacklistService.Blacklist(jti, DateTime.UtcNow.AddMinutes(appConfig.Jwt.ExpiryMinutes));
+            }
+
             return Results.Ok(new ApiResponse(ResultCodes.Success, "已登出"));
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserLogout);
     }
 }

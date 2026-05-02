@@ -12,6 +12,10 @@ public class ApplicationDbContext : DbContext
 
     public DbSet<User> Users { get; set; }
     public DbSet<EmailVerificationToken> EmailVerificationTokens { get; set; }
+    public DbSet<Permission> Permissions { get; set; }
+    public DbSet<UserGroup> UserGroups { get; set; }
+    public DbSet<UserGroupMember> UserGroupMembers { get; set; }
+    public DbSet<UserGroupPermission> UserGroupPermissions { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -50,6 +54,65 @@ public class ApplicationDbContext : DbContext
             entity.HasOne(e => e.User)
                 .WithMany(u => u.VerificationTokens)
                 .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Permission entity configuration
+        modelBuilder.Entity<Permission>(entity =>
+        {
+            entity.HasIndex(e => e.Code).IsUnique();
+            entity.HasIndex(e => e.Category);
+            entity.HasIndex(e => e.IsSystem);
+            entity.Property(e => e.CreatedAt)
+                .HasColumnType("datetime")
+                .ValueGeneratedOnAdd();
+        });
+
+        // UserGroup entity configuration
+        modelBuilder.Entity<UserGroup>(entity =>
+        {
+            entity.HasIndex(e => e.Name).IsUnique();
+        });
+
+        // UserGroupMember entity configuration
+        modelBuilder.Entity<UserGroupMember>(entity =>
+        {
+            entity.HasIndex(e => new { e.UserId, e.GroupId }).IsUnique();
+            entity.HasIndex(e => e.UserId);
+            entity.HasIndex(e => e.GroupId);
+            entity.Property(e => e.JoinedAt)
+                .HasColumnType("datetime")
+                .ValueGeneratedOnAdd();
+
+            entity.HasOne(e => e.User)
+                .WithMany()
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Group)
+                .WithMany(g => g.Members)
+                .HasForeignKey(e => e.GroupId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // UserGroupPermission entity configuration
+        modelBuilder.Entity<UserGroupPermission>(entity =>
+        {
+            entity.HasIndex(e => new { e.GroupId, e.PermissionId }).IsUnique();
+            entity.HasIndex(e => e.GroupId);
+            entity.HasIndex(e => e.PermissionId);
+            entity.Property(e => e.GrantedAt)
+                .HasColumnType("datetime")
+                .ValueGeneratedOnAdd();
+
+            entity.HasOne(e => e.Group)
+                .WithMany(g => g.GroupPermissions)
+                .HasForeignKey(e => e.GroupId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Permission)
+                .WithMany()
+                .HasForeignKey(e => e.PermissionId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

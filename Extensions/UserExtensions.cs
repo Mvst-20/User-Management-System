@@ -14,7 +14,6 @@ public static class UserExtensions
         {
             try
             {
-                // 使用 JsonDocument.Parse 替代 Deserialize，避免 trim 警告
                 using var doc = JsonDocument.Parse(user.Extras);
                 extras = doc.RootElement.Clone();
             }
@@ -53,11 +52,6 @@ public static class UserExtensions
     {
         var claim = principal.FindFirst("status");
         return claim != null && int.TryParse(claim.Value, out var status) ? (UserStatus)status : null;
-    }
-
-    public static bool IsAdmin(this ClaimsPrincipal principal)
-    {
-        return principal.GetUserRole() == UserRole.Admin;
     }
 
     public static bool IsOwnResource(this ClaimsPrincipal principal, ulong resourceUserId)

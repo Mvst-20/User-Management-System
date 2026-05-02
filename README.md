@@ -9,9 +9,10 @@
 - **邮箱验证**：完整的注册验证和邮箱修改流程，支持频率限制
 - **头像管理**：支持上传、下载、删除用户头像（路径遍历防护）
 - **在线状态**：基于内存的在线用户跟踪，自动过期清理
-- **管理员功能**：用户统计、服务器状态监控、邮件测试
+- **权限体系**：基于用户组的细粒度权限控制，支持 A/B/C 特殊权限
+- **用户组管理**：支持创建、编辑、删除用户组及分配权限和成员
 - **后台服务**：自动清理过期 Token 和过期在线状态
-- **自动初始化**：首次启动自动创建管理员账户
+- **自动初始化**：首次启动自动创建系统用户、管理员账户、权限和用户组
 - **输入验证**：所有请求 DTO 使用 Data Annotations 验证
 - **注册限流**：防止批量注册攻击
 - **异常处理**：统一异常中间件，生产环境隐藏内部错误信息
@@ -114,7 +115,10 @@ dotnet run --environment Production
 
 首次启动时，系统会自动：
 - 创建数据库和表
-- 生成初始管理员账户（用户名: `admin`，邮箱: `admin@system.local`）
+- 初始化权限表（含 A/B/C 特殊权限和各 API 权限）
+- 初始化用户组（初始用户、超级管理员、管理员、普通用户）
+- 创建系统初始用户（uid=0，用户名: `system`，持有 A 权限）
+- 生成超级管理员账户（用户名: `admin`，邮箱: `admin@system.local`，属于"超级管理员"组）
 - 在控制台和 `logs/init.log` 中显示随机生成的密码
 
 ## 生产环境部署清单
@@ -128,18 +132,79 @@ dotnet run --environment Production
 - [ ] 配置 `AllowedOrigins` 限制跨域来源
 - [ ] 配置反向代理（Nginx/Caddy）并启用 HTTPS
 - [ ] 登录后立即修改管理员密码
+- [ ] 妥善保管系统初始用户（uid=0）密码
 
-### 建议完成
+## 权限体系
 
-- [ ] 使用 EF Core Migrations 管理数据库变更（`dotnet ef migrations add` / `dotnet ef database update`）
-- [ ] 配置日志输出到文件（推荐使用 Serilog）
-- [ ] 配置进程管理工具（systemd / Supervisor / PM2）
-- [ ] 设置数据库定时备份
-- [ ] 在反向代理层配置速率限制
+### 概述
+
+系统采用**基于用户组的权限控制**模型：每个 API 端点对应一个权限代码，用户通过其所属的用户组获取权限。调用 API 时，系统检查用户所属用户组是否拥有该 API 对应的权限。
+
+### 特殊权限
+
+| 权限 | 代码 | 说明 |
+|------|------|------|
+| A 权限 | `PERM_A` | 最高权限，可使用全站所有 API（包括 B、C 权限覆盖的 API）。仅"初始用户"组持有，不可分配给其他用户组 |
+| B 权限 | `PERM_B` | 权限组管理权限，可管理权限表和用户组（除 ABC 外的所有权限） |
+| C 权限 | `PERM_C` | 服务器配置管理权限，可使用服务器管理相关 API |
+
+### 预设用户组
+
+| 用户组 | 说明 | 成员锁定 | 可删除 | 持有权限 |
+|--------|------|----------|--------|---------|
+| 初始用户 | 仅 uid=0 成员，持有 A 权限 | 是（不可添加/移除成员） | 否 | PERM_A |
+| 超级管理员 | 除 A 外的所有权限 | 否 | 否 | PERM_B, PERM_C + 全部 API 权限 |
+| 管理员 | 用户管理和基本管理权限 | 否 | 是 | 用户管理 + 统计 + 头像 + 用户组查看 |
+| 普通用户 | 基本用户权限 | 否 | 是 | 查看用户 + 更新自己 + 修改密码/邮箱 + 头像 + 登出 |
+
+> **初始用户组**：不可编辑（名称、描述、权限均不可修改）、不可删除、不可添加或移除成员。
+>
+> **超级管理员组**：不可删除，但可修改成员和权限。
+
+### 权限代码列表
+
+| 分类 | 代码 | 名称 | 说明 |
+|------|------|------|------|
+| special | `PERM_A` | 最高权限 | 全站所有 API |
+| special | `PERM_B` | 权限管理权限 | 管理权限表和用户组（除 ABC） |
+| special | `PERM_C` | 服务器管理权限 | 服务器管理 API |
+| user | `user:read` | 查看用户 | 查看用户信息 |
+| user | `user:update` | 更新用户 | 更新用户信息 |
+| user | `user:delete` | 删除用户 | 删除用户 |
+| user | `user:list` | 用户列表 | 查看用户列表 |
+| user | `user:change-password` | 修改密码 | 修改用户密码 |
+| user | `user:change-email` | 修改邮箱 | 修改用户邮箱 |
+| user | `user:logout` | 登出 | 用户登出 |
+| avatar | `avatar:upload` | 上传头像 | 上传用户头像 |
+| avatar | `avatar:delete` | 删除头像 | 删除用户头像 |
+| admin | `admin:stats` | 查看统计 | 管理员统计数据（C 权限覆盖） |
+| admin | `admin:server` | 服务器管理 | 服务器状态和配置（C 权限覆盖） |
+| permission | `permission:read` | 查看权限 | 查看权限列表（B 权限覆盖） |
+| permission | `permission:create` | 创建权限 | 创建新权限（B 权限覆盖） |
+| permission | `permission:update` | 更新权限 | 更新权限信息（B 权限覆盖） |
+| permission | `permission:delete` | 删除权限 | 删除权限（B 权限覆盖） |
+| user-group | `user-group:read` | 查看用户组 | 查看用户组（B 权限覆盖） |
+| user-group | `user-group:create` | 创建用户组 | 创建新用户组（B 权限覆盖） |
+| user-group | `user-group:update` | 更新用户组 | 更新用户组信息（B 权限覆盖） |
+| user-group | `user-group:delete` | 删除用户组 | 删除用户组（B 权限覆盖） |
+| user-group | `user-group:manage-members` | 管理成员 | 添加/移除用户组成员（B 权限覆盖） |
+| user-group | `user-group:manage-permissions` | 管理权限 | 设置用户组权限（B 权限覆盖） |
+
+### 权限检查逻辑
+
+1. 用户请求 API → 从 JWT 获取用户 ID
+2. 查询用户所属的所有用户组及其权限（带内存缓存，5 分钟过期）
+3. 检查顺序：
+   - 拥有 **A 权限** → 直接通过
+   - API 属于 B 权限覆盖范围（权限管理 + 用户组管理）且 拥有 **B 权限** → 通过
+   - API 属于 C 权限覆盖范围 且 拥有 **C 权限** → 通过
+   - 拥有该 API 对应的**具体权限** → 通过
+   - 否则 → 403 Forbidden
+4. 部分 API 支持 `allowSelf`：访问自己的资源时跳过权限检查
 
 ## API 端点
 
-### 公开端点（无需认证）
+### 公开端点（无需认证和权限）
 
 | 方法 | 路由 | 描述 | 请求体/参数 |
 |------|------|------|-------------|
@@ -149,6 +214,7 @@ dotnet run --environment Production
 | POST | `/api/users/resend-verification` | 重新发送验证邮件 | `{email}` |
 | GET | `/api/users/verify-email-change` | 确认修改邮箱 | Query: `?token=xxx` |
 | GET | `/api/avatars/{filename}` | 获取头像 | - |
+| GET | `/api/permissions/custom` | 获取自定义权限列表 | - |
 | GET | `/health` | 健康检查 | - |
 
 **请求验证规则**：
@@ -159,39 +225,75 @@ dotnet run --environment Production
 
 **注册限流**：同一邮箱每分钟最多 5 次注册请求。
 
-### 用户端点（需要认证）
+> 新注册用户会自动加入"普通用户"组。
 
-| 方法 | 路由 | 描述 | 权限 | 请求体 |
-|------|------|------|------|--------|
-| GET | `/api/users/{id}` | 获取用户信息 | 本人或管理员 | - |
-| PUT | `/api/users/{id}` | 完全更新用户 | 本人或管理员 | `{username?, email?, phone?, role?, extras?}` |
-| PATCH | `/api/users/{id}` | 部分更新用户 | 本人或管理员 | `{username?, phone?, extras?}` |
-| DELETE | `/api/users/{id}` | 软删除用户 | 仅管理员 | - |
-| GET | `/api/users` | 分页查询用户列表 | 仅管理员 | Query: `?page=1&pageSize=10&status=&role=&search=` |
-| POST | `/api/users/{id}/change-password` | 修改密码 | 本人 | `{currentPassword, newPassword}` |
-| POST | `/api/users/{id}/change-email` | 申请修改邮箱 | 本人 | `{newEmail, password}` |
-| POST | `/api/users/{id}/avatar` | 上传头像 | 本人或管理员 | `multipart/form-data: file` |
-| DELETE | `/api/users/{id}/avatar` | 删除头像 | 本人或管理员 | - |
-| POST | `/api/users/logout` | 用户登出 | 已认证用户 | - |
+### 用户端点（需要认证 + 权限）
+
+| 方法 | 路由 | 描述 | 所需权限 | allowSelf |
+|------|------|------|---------|-----------|
+| GET | `/api/users/{id}` | 获取用户信息 | `user:read` | 是 |
+| PUT | `/api/users/{id}` | 完全更新用户 | `user:update` | 是 |
+| PATCH | `/api/users/{id}` | 部分更新用户 | `user:update` | 是 |
+| DELETE | `/api/users/{id}` | 软删除用户 | `user:delete` | 否 |
+| GET | `/api/users` | 分页查询用户列表 | `user:list` | - |
+| POST | `/api/users/{id}/change-password` | 修改密码 | `user:change-password` | 是 |
+| POST | `/api/users/{id}/change-email` | 申请修改邮箱 | `user:change-email` | 是 |
+| POST | `/api/users/{id}/avatar` | 上传头像 | `avatar:upload` | 是 |
+| DELETE | `/api/users/{id}/avatar` | 删除头像 | `avatar:delete` | 是 |
+| POST | `/api/users/logout` | 用户登出 | `user:logout` | 否 |
+
+> **allowSelf**：访问自己的资源（路由参数 `{id}` 与当前用户 ID 匹配）时跳过权限检查。
 
 > **邮箱修改**：普通用户不能通过 PUT/PATCH 直接修改邮箱，必须通过 change-email 流程（验证密码 → 发送验证邮件 → 确认修改）。管理员可直接通过 PUT 修改。
 
 > **头像上传**：仅支持 JPG/PNG/GIF/WebP 格式，最大 5MB。
 
-### 管理员端点（需要管理员权限）
+### 管理员端点（需要认证 + 权限）
 
-| 方法 | 路由 | 描述 | 参数 |
-|------|------|------|------|
-| GET | `/api/admin/stats/online-users` | 在线用户数量 | - |
-| GET | `/api/admin/stats/new-users` | 新注册用户数 | Query: `?days=30` |
-| GET | `/api/admin/stats/active-users` | 活跃用户数 | Query: `?days=30` |
-| GET | `/api/admin/server/status` | 服务器状态 | - |
-| POST | `/api/admin/email/test` | 发送测试邮件 | `{to, subject, body}` |
+| 方法 | 路由 | 描述 | 所需权限 | 特殊覆盖 |
+|------|------|------|---------|---------|
+| GET | `/api/admin/stats/online-users` | 在线用户数量 | `admin:stats` | C 权限 |
+| GET | `/api/admin/stats/new-users` | 新注册用户数 | `admin:stats` | C 权限 |
+| GET | `/api/admin/stats/active-users` | 活跃用户数 | `admin:stats` | C 权限 |
+| GET | `/api/admin/server/status` | 服务器状态 | `admin:server` | C 权限 |
+| POST | `/api/admin/email/test` | 发送测试邮件 | `admin:server` | C 权限 |
 
 **统计 API 参数说明**：
 
 - `days`（Query 参数，正整数）：统计天数范围，如 `days=30` 表示从 30 天前到今天的统计数据
-- 响应包含统计数量、查询天数、开始日期和结束日期
+
+### 权限管理端点（需要认证 + 权限）
+
+| 方法 | 路由 | 描述 | 所需权限 | 特殊覆盖 |
+|------|------|------|---------|---------|
+| GET | `/api/permissions` | 获取所有权限 | `permission:read` | B 权限 |
+| POST | `/api/permissions/check` | 权限检查 | 认证即可 | - |
+| POST | `/api/permissions` | 创建权限 | `permission:create` | B 权限 |
+| PUT | `/api/permissions/{id}` | 更新权限 | `permission:update` | B 权限 |
+| DELETE | `/api/permissions/{id}` | 删除权限 | `permission:delete` | B 权限 |
+
+> B 权限持有者可管理权限表和用户组，但**不可**创建、修改或删除 A/B/C 特殊权限。
+
+### 用户组管理端点（需要认证 + 权限）
+
+| 方法 | 路由 | 描述 | 所需权限 |
+|------|------|------|---------|
+| GET | `/api/user-groups` | 用户组列表（分页） | `user-group:read` |
+| GET | `/api/user-groups/{id}` | 用户组详情 | `user-group:read` |
+| POST | `/api/user-groups` | 创建用户组 | `user-group:create` |
+| PUT | `/api/user-groups/{id}` | 更新用户组 | `user-group:update` |
+| DELETE | `/api/user-groups/{id}` | 删除用户组 | `user-group:delete` |
+| POST | `/api/user-groups/{id}/members` | 添加组成员 | `user-group:manage-members` |
+| DELETE | `/api/user-groups/{id}/members/{userId}` | 移除组成员 | `user-group:manage-members` |
+| PUT | `/api/user-groups/{id}/permissions` | 设置组权限 | `user-group:manage-permissions` |
+| GET | `/api/user-groups/{id}/extras` | 获取用户组自定义字段 | `user-group:read` |
+| PUT | `/api/user-groups/{id}/extras` | 更新用户组自定义字段 | `user-group:update` |
+
+> **初始用户组**（`is_protected=true, is_member_locked=true`）不可编辑、不可删除、不可添加/移除成员。
+>
+> **超级管理员组**（`is_protected=true`）不可删除，但可修改成员和权限。
+>
+> **A 权限不可分配**给除"初始用户"外的任何用户组。
 
 ## API 响应格式
 
@@ -227,7 +329,7 @@ dotnet run --environment Production
 |------|------|---------|
 | 0xx | 通用 | 0=成功, 1=错误, 2=验证错误, 3=未授权, 4=禁止, 5=不存在, 6=内部错误, 7=频率限制 |
 | 1xx | 注册 | 100=成功, 101=用户名存在, 102=邮箱已注册, 103=手机号已使用 |
-| 2xx | 登录 | 200=成功, 201=用户名或密码错误, 203=账号已注销, 204=账号已封禁 |
+| 2xx | 登录 | 200=成功, 201=用户名或密码错误, 203=账号已注销, 204=账号未验证 |
 | 3xx | 邮箱验证 | 300=成功, 301=无效链接, 302=链接过期, 303=无效类型, 310=重发成功, 311=频率限制 |
 | 4xx | 邮箱修改 | 400=请求成功, 401=邮箱相同, 402=邮箱已使用, 403=密码错误, 410=确认成功 |
 | 5xx | 密码修改 | 500=成功, 501=当前密码错误, 502=新旧密码相同 |
@@ -235,6 +337,8 @@ dotnet run --environment Production
 | 7xx | 头像 | 700=上传成功, 701=格式错误, 702=文件过大, 710=删除成功 |
 | 8xx | 管理员 | 800=统计成功, 810=服务器状态成功 |
 | 9xx | 邮件 | 900=发送成功, 901=发送失败 |
+| 10xx | 权限 | 1000=权限不足, 1001=权限不存在, 1002=权限代码已存在, 1010=创建成功, 1011=更新成功, 1012=删除成功, 1013=不可修改特殊权限 |
+| 11xx | 用户组 | 1100=用户组不存在, 1101=名称已存在, 1110=创建成功, 1111=更新成功, 1112=删除成功, 1113=受保护不可操作, 1120=成员已存在, 1121=成员不存在, 1122=添加成功, 1123=移除成功, 1124=成员锁定, 1130=设置权限成功, 1131=A权限限制, 1150=权限检查完成, 1160=扩展字段更新成功 |
 
 ## 用户状态
 
@@ -252,23 +356,42 @@ dotnet run --environment Production
 | 1 | User | 普通用户，基本权限 |
 | 2 | Admin | 管理员，管理用户、查看统计等 |
 
+> 用户角色是基础分类，实际权限由用户组决定。
+
+## 数据库表
+
+| 表名 | 说明 |
+|------|------|
+| `users` | 用户表 |
+| `email_verification_tokens` | 邮箱验证令牌表 |
+| `permissions` | 权限表（含特殊权限 A/B/C 和各 API 权限） |
+| `user_groups` | 用户组表（含自定义 JSON 扩展字段 `extras`） |
+| `user_group_members` | 用户组成员关联表 |
+| `user_group_permissions` | 用户组权限关联表 |
+
 ## 项目结构
 
 ```
 UCS/
 ├── Configuration/       # 配置类 (AppConfiguration, JwtConfig, SmtpConfig, AppSettings)
 ├── Data/               # 数据库上下文 (ApplicationDbContext)
-├── DTOs/               # 数据传输对象 (ApiResponse, ResultCodes, UserDTOs)
-├── Endpoints/          # API 端点定义 (UserEndpoints, AdminEndpoints, AvatarEndpoints)
-├── Extensions/         # 扩展方法 (UserExtensions)
+├── DTOs/               # 数据传输对象 (ApiResponse, ResultCodes, PermissionCodes, UserDTOs, PermissionDTOs)
+├── Endpoints/          # API 端点定义
+│   ├── UserEndpoints.cs           # 用户端点
+│   ├── AdminEndpoints.cs          # 管理员端点
+│   ├── AvatarEndpoints.cs         # 头像端点
+│   ├── PermissionEndpoints.cs     # 权限管理端点
+│   └── UserGroupEndpoints.cs      # 用户组管理端点
+├── Extensions/         # 扩展方法 (UserExtensions, PermissionEndpointExtensions)
 ├── Middleware/         # 中间件 (ExceptionHandlingMiddleware)
-├── Models/             # 实体模型 (User, EmailVerificationToken, 枚举)
+├── Models/             # 实体模型 (User, EmailVerificationToken, Permission, UserGroup, 枚举)
 ├── Services/           # 业务服务
 │   ├── ConsoleService.cs          # 控制台输出
 │   ├── EmailService.cs            # 邮件发送
-│   ├── InitializationService.cs   # 启动初始化
+│   ├── InitializationService.cs   # 启动初始化（含权限和用户组种子数据）
 │   ├── JwtService.cs              # JWT Token 生成
 │   ├── OnlineUserService.cs       # 在线用户跟踪（单例）
+│   ├── PermissionService.cs       # 权限检查和管理
 │   ├── TokenCleanupService.cs     # 后台清理服务（每小时）
 │   ├── TokenService.cs            # 验证 Token 管理
 │   └── UserService.cs             # 用户业务逻辑
@@ -284,16 +407,20 @@ UCS/
 
 1. 首次运行后请立即登录并修改管理员密码
 2. 初始管理员密码会输出到控制台和 `logs/init.log`
-3. **生产环境请务必修改 JWT Key**（至少 64 字符的随机字符串）
-4. **生产环境请务必修改数据库密码**
-5. 生产环境请配置 `AllowedOrigins` 限制跨域来源
-6. 生产环境请配置 `ApiBaseUrl` 为 HTTPS 地址
-7. 密码使用 BCrypt Work Factor 12 存储
-8. 邮件发送频率限制：同一邮箱 1 分钟内只能请求一次
-9. 注册频率限制：同一邮箱每分钟最多 5 次
-10. 封禁用户无法登录，也无法获取 JWT Token
-11. 头像端点已做路径遍历防护
-12. 异常中间件在生产环境隐藏内部错误详情
+3. 系统初始用户（uid=0）密码同样会输出到 `logs/init.log`，请妥善保管
+4. **生产环境请务必修改 JWT Key**（至少 64 字符的随机字符串）
+5. **生产环境请务必修改数据库密码**
+6. 生产环境请配置 `AllowedOrigins` 限制跨域来源
+7. 生产环境请配置 `ApiBaseUrl` 为 HTTPS 地址
+8. 密码使用 BCrypt Work Factor 12 存储
+9. 邮件发送频率限制：同一邮箱 1 分钟内只能请求一次
+10. 注册频率限制：同一邮箱每分钟最多 5 次
+11. 封禁用户无法登录，也无法获取 JWT Token
+12. 头像端点已做路径遍历防护
+13. 异常中间件在生产环境隐藏内部错误详情
+14. A 权限仅限"初始用户"组，无法分配给其他用户组
+15. 特殊权限（A/B/C）不可通过 API 创建、修改或删除
+16. 权限检查结果带内存缓存（5 分钟过期），修改权限后自动清除对应用户缓存
 
 ## 许可证
 

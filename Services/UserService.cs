@@ -139,4 +139,24 @@ public class UserService : IUserService
 
         return user;
     }
+
+    public async Task<bool> ActiveUsernameExistsAsync(string username)
+    {
+        return await _context.Users
+            .AnyAsync(u => u.Username == username && u.Status != UserStatus.Deleted);
+    }
+
+    public async Task<bool> ActiveEmailExistsAsync(string email)
+    {
+        return await _context.Users
+            .AnyAsync(u => u.Email == email && u.Status != UserStatus.Deleted);
+    }
+
+    public async Task<bool> ActivePhoneExistsAsync(string phone, ulong? excludeUserId = null)
+    {
+        var query = _context.Users.Where(u => u.Phone == phone && u.Status != UserStatus.Deleted);
+        if (excludeUserId.HasValue)
+            query = query.Where(u => u.Id != excludeUserId.Value);
+        return await query.AnyAsync();
+    }
 }

@@ -1,6 +1,10 @@
 using System.Security.Cryptography;
+using Microsoft.EntityFrameworkCore;
 using UserManagementSystem.Configuration;
+using UserManagementSystem.Data;
+using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
+using UserManagementSystem.Services;
 
 namespace UserManagementSystem.Services;
 
@@ -19,12 +23,73 @@ public class InitializationService : IHostedService
     {
         using var scope = _serviceProvider.CreateScope();
         var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
+        var permissionService = scope.ServiceProvider.GetRequiredService<IPermissionService>();
         var consoleService = scope.ServiceProvider.GetRequiredService<IConsoleService>();
         var appConfig = scope.ServiceProvider.GetRequiredService<AppConfiguration>();
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
         consoleService.PrintInfo("Database", "Connected successfully");
 
-        // 检查并创建初始管理员账户
+        // ============ 初始化权限和用户组 ============
+        await permissionService.SeedPermissionsAndGroupsAsync();
+
+        // ============ 创建系统初始用户（uid=0）============
+        var systemUser = await context.Users.FirstOrDefaultAsync(u => u.Id == 0);
+        if (systemUser == null)
+        {
+            var systemPassword = GenerateRandomPassword(appConfig.AppSettings.AdminPasswordLength);
+            systemUser = new User
+            {
+                Id = 0,
+                Username = "system",
+                Email = "system@internal.local",
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(systemPassword, 12),
+                Role = UserRole.Admin,
+                Status = UserStatus.Normal,
+                EmailVerifiedAt = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            await context.Database.ExecuteSqlRawAsync(
+                "INSERT INTO users (id, username, email, password_hash, status, role, email_verified_at, created_at) " +
+                "VALUES (0, {0}, {1}, {2}, {3}, {4}, {5}, {6})",
+                systemUser.Username,
+                systemUser.Email,
+                systemUser.PasswordHash,
+                (int)systemUser.Status,
+                (int)systemUser.Role,
+                systemUser.EmailVerifiedAt,
+                systemUser.CreatedAt
+            );
+
+            // 将系统用户加入"初始用户"组
+            var initialGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.InitialGroupName);
+            if (initialGroup != null)
+            {
+                await permissionService.AddMemberAsync(initialGroup.Id, 0);
+            }
+
+            // 写入日志
+            var logPath = Path.Combine(Directory.GetCurrentDirectory(), "logs", "init.log");
+            var logContent = $@"================================================================================
+  User Management System - System Initial User (uid=0)
+  Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC
+================================================================================
+
+Username: system
+Email: system@internal.local
+Password: {systemPassword}
+
+This user holds the A (supreme) permission via the '{PermissionCodes.InitialGroupName}' group.
+Keep these credentials extremely secure.
+
+================================================================================
+";
+            await File.AppendAllTextAsync(logPath, logContent, cancellationToken);
+            consoleService.PrintInitSuccess("system", "system@internal.local", systemPassword);
+        }
+
+        // ============ 创建超级管理员账户 ============
         if (!await userService.HasAdminAsync())
         {
             var adminPassword = GenerateRandomPassword(appConfig.AppSettings.AdminPasswordLength);
@@ -41,10 +106,15 @@ public class InitializationService : IHostedService
 
             await userService.CreateUserAsync(adminUser);
 
-            // 写入日志
+            var superAdminGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.SuperAdminGroupName);
+            if (superAdminGroup != null)
+            {
+                await permissionService.AddMemberAsync(superAdminGroup.Id, adminUser.Id);
+            }
+
             var logPath = Path.Combine(Directory.GetCurrentDirectory(), "logs", "init.log");
             var logContent = $@"================================================================================
-  User Management System - Initial Administrator Account
+  User Management System - Super Administrator Account
   Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC
 ================================================================================
 
@@ -52,14 +122,12 @@ Username: admin
 Email: admin@system.local
 Password: {adminPassword}
 
+This user is in the '{PermissionCodes.SuperAdminGroupName}' group with all permissions except A.
 Please login and change the password immediately.
-Password is masked in log file, keep it safe.
 
 ================================================================================
 ";
-
             await File.AppendAllTextAsync(logPath, logContent, cancellationToken);
-
             consoleService.PrintInitSuccess("admin", "admin@system.local", adminPassword);
         }
         else
