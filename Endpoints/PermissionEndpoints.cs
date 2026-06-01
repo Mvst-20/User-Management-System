@@ -60,7 +60,7 @@ public static class PermissionEndpoints
             {
                 if (!currentUserId.HasValue || !await permissionService.HasPermissionAsync(currentUserId.Value, PermissionCodes.PermissionRead))
                 {
-                    return Results.StatusCode(403);
+                    return Results.Json(new ApiResponse(ResultCodes.Forbidden, "权限不足，查看他人权限需要 permission:read 权限"), statusCode: 403);
                 }
             }
 

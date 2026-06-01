@@ -50,17 +50,43 @@ public class InitializationService : IHostedService
                 CreatedAt = DateTime.UtcNow
             };
 
-            await context.Database.ExecuteSqlRawAsync(
-                "INSERT INTO users (id, username, email, password_hash, status, role, email_verified_at, created_at) " +
-                "VALUES (0, {0}, {1}, {2}, {3}, {4}, {5}, {6})",
-                systemUser.Username,
-                systemUser.Email,
-                systemUser.PasswordHash,
-                (int)systemUser.Status,
-                (int)systemUser.Role,
-                systemUser.EmailVerifiedAt,
-                systemUser.CreatedAt
-            );
+            // MySQL 默认 sql_mode 不含 NO_AUTO_VALUE_ON_ZERO，向 AUTO_INCREMENT 列插入 0
+            // 会被解释为"使用下一个自增值"而非字面量 0。需要显式开启才能插入 uid=0。
+            await context.Database.OpenConnectionAsync(cancellationToken);
+            try
+            {
+                // 保存并修改 sql_mode，允许向自增列插入字面量 0
+                await context.Database.ExecuteSqlRawAsync(
+                    "SET @__ucs_old_mode = @@SESSION.sql_mode");
+                await context.Database.ExecuteSqlRawAsync(
+                    "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_AUTO_VALUE_ON_ZERO')");
+
+                try
+                {
+                    await context.Database.ExecuteSqlRawAsync(
+                        "INSERT INTO users (id, username, email, password_hash, status, role, email_verified_at, created_at) " +
+                        "VALUES (0, {0}, {1}, {2}, {3}, {4}, {5}, {6})",
+                        systemUser.Username,
+                        systemUser.Email,
+                        systemUser.PasswordHash,
+                        (int)systemUser.Status,
+                        (int)systemUser.Role,
+                        systemUser.EmailVerifiedAt,
+                        systemUser.CreatedAt
+                    );
+                }
+                finally
+                {
+                    // 无论 INSERT 是否成功，都必须恢复原始 sql_mode，
+                    // 避免连接归还池后影响其他操作
+                    await context.Database.ExecuteSqlRawAsync(
+                        "SET SESSION sql_mode = @__ucs_old_mode");
+                }
+            }
+            finally
+            {
+                await context.Database.CloseConnectionAsync();
+            }
 
             // 将系统用户加入"初始用户"组
             var initialGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.InitialGroupName);

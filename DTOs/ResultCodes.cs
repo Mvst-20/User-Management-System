@@ -107,7 +107,6 @@ public static class ResultCodes
     public const int UserGroupMemberLocked = 1124;             // 用户组成员锁定，不可修改
     public const int UserGroupPermissionSetSuccess = 1130;     // 设置权限成功
     public const int PermissionAPermissionRestricted = 1131;   // A权限不可分配给非初始用户组
-    public const int UserGroupNotFoundById = 1140;             // 用户组ID不存在
     public const int PermissionCheckSuccess = 1150;            // 权限检查完成
     public const int UserGroupExtrasUpdateSuccess = 1160;      // 用户组扩展字段更新成功
 }
