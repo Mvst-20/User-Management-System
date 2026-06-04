@@ -1,4 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.Processing;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Extensions;
 using UserManagementSystem.Models;
@@ -24,6 +28,21 @@ public static class AvatarEndpoints
         { ".gif", new byte[] { 0x47, 0x49, 0x46, 0x38 } }, // GIF8
         { ".webp", new byte[] { 0x52, 0x49, 0x46, 0x46 } }, // RIFF (WebP container)
     };
+
+    /// <summary>
+    /// 压缩触发阈值：512KB
+    /// </summary>
+    private const long CompressionThreshold = 512 * 1024;
+
+    /// <summary>
+    /// 缩略图最大边长（像素）
+    /// </summary>
+    private const int ThumbnailMaxSize = 256;
+
+    /// <summary>
+    /// 压缩后 JPEG 质量（1-100）
+    /// </summary>
+    private const int JpegQuality = 80;
 
     /// <summary>
     /// 验证文件流的前几个字节是否匹配指定扩展名的魔数签名
@@ -54,6 +73,97 @@ public static class AvatarEndpoints
         {
             fileStream.Position = originalPosition;
         }
+    }
+
+    /// <summary>
+    /// 压缩图片并生成缩略图。返回 (压缩后的原图字节, 缩略图字节)。
+    /// 若图片小于等于阈值，返回 (null, null) 表示无需压缩。
+    /// </summary>
+    private static (byte[]? compressed, byte[]? thumbnail) CompressImage(Stream sourceStream, string extension, long originalSize)
+    {
+        if (originalSize <= CompressionThreshold)
+            return (null, null);
+
+        sourceStream.Position = 0;
+
+        using var image = Image.Load(sourceStream);
+
+        // 压缩原图：保持原始尺寸，降低质量
+        using var compressedStream = new MemoryStream();
+        SaveImage(image, compressedStream, extension);
+        var compressedBytes = compressedStream.ToArray();
+
+        // 如果压缩后反而更大，放弃压缩
+        if (compressedBytes.Length >= originalSize)
+            return (null, null);
+
+        // 生成缩略图：等比缩放，最大边长 256px
+        using var thumbImage = image.Clone(ctx => ctx.Resize(new ResizeOptions
+        {
+            Mode = ResizeMode.Max,
+            Size = new Size(ThumbnailMaxSize, ThumbnailMaxSize)
+        }));
+
+        using var thumbStream = new MemoryStream();
+        SaveImage(thumbImage, thumbStream, extension);
+        var thumbBytes = thumbStream.ToArray();
+
+        return (compressedBytes, thumbBytes);
+    }
+
+    /// <summary>
+    /// 根据扩展名保存图片到流
+    /// </summary>
+    private static void SaveImage(Image image, Stream stream, string extension)
+    {
+        switch (extension.ToLower())
+        {
+            case ".jpg":
+            case ".jpeg":
+                image.SaveAsJpeg(stream, new JpegEncoder { Quality = JpegQuality });
+                break;
+            case ".png":
+                image.SaveAsPng(stream, new PngEncoder { CompressionLevel = PngCompressionLevel.DefaultCompression });
+                break;
+            case ".gif":
+                image.SaveAsGif(stream);
+                break;
+            case ".webp":
+                image.SaveAsWebp(stream, new SixLabors.ImageSharp.Formats.Webp.WebpEncoder { Quality = JpegQuality });
+                break;
+            default:
+                image.SaveAsJpeg(stream, new JpegEncoder { Quality = JpegQuality });
+                break;
+        }
+    }
+
+    /// <summary>
+    /// 删除头像文件（原图 + 缩略图）
+    /// </summary>
+    private static void DeleteAvatarFiles(string avatarsPath, string? avatarUrl)
+    {
+        if (string.IsNullOrEmpty(avatarUrl))
+            return;
+
+        var fileName = Path.GetFileName(avatarUrl);
+        var filePath = Path.Combine(avatarsPath, fileName);
+        if (File.Exists(filePath))
+            File.Delete(filePath);
+
+        // 删除缩略图
+        var thumbPath = GetThumbnailPath(avatarsPath, fileName);
+        if (File.Exists(thumbPath))
+            File.Delete(thumbPath);
+    }
+
+    /// <summary>
+    /// 根据原图文件名获取缩略图路径
+    /// </summary>
+    private static string GetThumbnailPath(string avatarsPath, string originalFileName)
+    {
+        var nameWithoutExt = Path.GetFileNameWithoutExtension(originalFileName);
+        var ext = Path.GetExtension(originalFileName);
+        return Path.Combine(avatarsPath, $"{nameWithoutExt}_thumb{ext}");
     }
 
     public static void MapAvatarEndpoints(this WebApplication app)
@@ -92,10 +202,10 @@ public static class AvatarEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "不支持的文件扩展名"));
             }
 
-            // 验证文件大小（最大 5MB）
-            if (file.Length > 5 * 1024 * 1024)
+            // 验证文件大小（最大 6MB）
+            if (file.Length > 6 * 1024 * 1024)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_FileTooLarge, "图片大小不能超过 5MB"));
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_FileTooLarge, "图片大小不能超过 6MB"));
             }
 
             // 验证文件内容（magic bytes），防止 Content-Type 伪装
@@ -106,25 +216,37 @@ public static class AvatarEndpoints
             }
 
             // 生成文件名（使用固定安全扩展名，不使用用户提供的扩展名）
-            var fileName = $"{user.Id}_{Guid.NewGuid():N}{extension}";
+            var baseName = $"{user.Id}_{Guid.NewGuid():N}";
+            var fileName = $"{baseName}{extension}";
             var filePath = Path.Combine(avatarsPath, fileName);
 
-            // 删除旧头像
-            if (!string.IsNullOrEmpty(user.AvatarUrl))
-            {
-                var oldPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot",
-                    user.AvatarUrl.TrimStart('/').Replace("/", Path.DirectorySeparatorChar.ToString()));
-                if (File.Exists(oldPath))
-                {
-                    File.Delete(oldPath);
-                }
-            }
+            // 删除旧头像（原图 + 缩略图）
+            DeleteAvatarFiles(avatarsPath, user.AvatarUrl);
 
-            // 保存新头像（使用已打开的 fileStream）
+            // 压缩处理
             fileStream.Position = 0;
-            using (var stream = new FileStream(filePath, FileMode.Create))
+            var (compressed, thumbnail) = CompressImage(fileStream, extension, file.Length);
+
+            bool hasThumbnail = false;
+
+            if (compressed != null && thumbnail != null)
             {
-                await fileStream.CopyToAsync(stream);
+                // 文件大于 512KB，已压缩
+                await File.WriteAllBytesAsync(filePath, compressed);
+
+                // 保存缩略图
+                var thumbPath = GetThumbnailPath(avatarsPath, fileName);
+                await File.WriteAllBytesAsync(thumbPath, thumbnail);
+                hasThumbnail = true;
+            }
+            else
+            {
+                // 文件小于等于 512KB，直接保存原图，缩略图 = 原图
+                fileStream.Position = 0;
+                using (var stream = new FileStream(filePath, FileMode.Create))
+                {
+                    await fileStream.CopyToAsync(stream);
+                }
             }
 
             // 更新用户头像路径
@@ -132,7 +254,7 @@ public static class AvatarEndpoints
             await userService.UpdateUserAsync(user);
 
             return Results.Ok(new ApiResponse(ResultCodes.UploadAvatarSuccess, "头像上传成功",
-                new AvatarDataResponse(user.AvatarUrl)));
+                new AvatarUploadDataResponse(user.AvatarUrl, hasThumbnail)));
         }).RequireAuthorization().RequirePermission(PermissionCodes.AvatarUpload, allowSelf: true);
 
         // 删除头像（允许本人或拥有 avatar:delete 权限）
@@ -152,16 +274,8 @@ public static class AvatarEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
-            // 删除头像文件
-            if (!string.IsNullOrEmpty(user.AvatarUrl))
-            {
-                var filePath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot",
-                    user.AvatarUrl.TrimStart('/').Replace("/", Path.DirectorySeparatorChar.ToString()));
-                if (File.Exists(filePath))
-                {
-                    File.Delete(filePath);
-                }
-            }
+            // 删除头像文件（原图 + 缩略图）
+            DeleteAvatarFiles(avatarsPath, user.AvatarUrl);
 
             user.AvatarUrl = null;
             await userService.UpdateUserAsync(user);
@@ -169,9 +283,10 @@ public static class AvatarEndpoints
             return Results.Ok(new ApiResponse(ResultCodes.DeleteAvatarSuccess, "头像已删除"));
         }).RequireAuthorization().RequirePermission(PermissionCodes.AvatarDelete, allowSelf: true);
 
-        // 获取头像（公开）— 添加路径遍历防护
+        // 获取头像（公开）— 支持 type=thumb 获取缩略图
         app.MapGet("/api/avatars/{filename}", (
-            string filename) =>
+            string filename,
+            [FromQuery] string? type) =>
         {
             // 防止路径遍历攻击
             if (filename.Contains("..") || filename.Contains('/') || filename.Contains('\\') || filename.Contains(Path.DirectorySeparatorChar))
@@ -185,7 +300,28 @@ public static class AvatarEndpoints
                 return Results.BadRequest();
             }
 
-            var filePath = Path.Combine(avatarsPath, filename);
+            // 确定要返回的文件
+            var isThumb = string.Equals(type, "thumb", StringComparison.OrdinalIgnoreCase);
+            var targetFileName = isThumb
+                ? $"{Path.GetFileNameWithoutExtension(filename)}_thumb{Path.GetExtension(filename)}"
+                : filename;
+
+            var filePath = Path.Combine(avatarsPath, targetFileName);
+
+            // 如果请求缩略图但不存在，回退到原图
+            if (!File.Exists(filePath))
+            {
+                if (isThumb)
+                {
+                    filePath = Path.Combine(avatarsPath, filename);
+                    if (!File.Exists(filePath))
+                        return Results.NotFound();
+                }
+                else
+                {
+                    return Results.NotFound();
+                }
+            }
 
             // 确保解析后的路径仍在 avatars 目录内
             var fullPath = Path.GetFullPath(filePath);
@@ -193,11 +329,6 @@ public static class AvatarEndpoints
             if (!fullPath.StartsWith(fullAvatarsPath, StringComparison.OrdinalIgnoreCase))
             {
                 return Results.BadRequest();
-            }
-
-            if (!File.Exists(filePath))
-            {
-                return Results.NotFound();
             }
 
             var contentType = extension switch

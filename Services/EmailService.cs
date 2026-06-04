@@ -40,7 +40,7 @@ public class EmailService : IEmailService
             {
                 465 => MailKit.Security.SecureSocketOptions.SslOnConnect,
                 587 => MailKit.Security.SecureSocketOptions.StartTls,
-                _ => _config.Smtp.UseSsl ? MailKit.Security.SecureSocketOptions.SslOnConnect : MailKit.Security.SecureSocketOptions.None
+                _ => _config.Smtp.UseSsl ? MailKit.Security.SecureSocketOptions.SslOnConnect : MailKit.Security.SecureSocketOptions.StartTls
             };
             
             await client.ConnectAsync(_config.Smtp.Host, _config.Smtp.Port, secureSocketOptions);

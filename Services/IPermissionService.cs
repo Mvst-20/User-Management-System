@@ -30,7 +30,8 @@ public interface IPermissionService
     Task<bool> AddMemberAsync(ulong groupId, ulong userId);
     Task<bool> RemoveMemberAsync(ulong groupId, ulong userId);
     Task<List<UserGroupMember>> GetGroupMembersAsync(ulong groupId);
-    Task<List<UserGroup>> GetUserGroupsAsync(ulong userId);
+    Task<List<UserGroupMember>> GetUserGroupsAsync(ulong userId);
+    Task<bool> SetUserGroupsAsync(ulong userId, List<ulong> groupIds);
 
     // ============ 权限分配 ============
     Task<bool> SetGroupPermissionsAsync(ulong groupId, List<ulong> permissionIds);

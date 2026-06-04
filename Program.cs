@@ -6,6 +6,7 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using UserManagementSystem.Configuration;
 using UserManagementSystem.Data;
+using UserManagementSystem.DTOs;
 using UserManagementSystem.Endpoints;
 using UserManagementSystem.Middleware;
 using UserManagementSystem.Services;
@@ -27,6 +28,24 @@ var appConfig = new AppConfiguration();
 builder.Configuration.GetSection("Jwt").Bind(appConfig.Jwt);
 builder.Configuration.GetSection("Smtp").Bind(appConfig.Smtp);
 builder.Configuration.GetSection("AppSettings").Bind(appConfig.AppSettings);
+
+// 启动配置验证
+if (string.IsNullOrWhiteSpace(appConfig.Jwt.Key) || appConfig.Jwt.Key.Length < 64)
+{
+    throw new InvalidOperationException("JWT Key 必须至少 64 个字符，请在 appsettings.json 中配置安全的密钥。");
+}
+if (string.IsNullOrWhiteSpace(appConfig.Smtp.Host))
+{
+    throw new InvalidOperationException("SMTP Host 不能为空，请在 appsettings.json 中配置 SMTP 服务器。");
+}
+if (string.IsNullOrWhiteSpace(appConfig.Smtp.Username) || string.IsNullOrWhiteSpace(appConfig.Smtp.Password))
+{
+    throw new InvalidOperationException("SMTP Username 和 Password 不能为空，请在 appsettings.json 中配置 SMTP 凭据。");
+}
+if (string.IsNullOrWhiteSpace(appConfig.Smtp.From))
+{
+    throw new InvalidOperationException("SMTP From 不能为空，请在 appsettings.json 中配置发件人邮箱。");
+}
 
 // ============ 数据库配置 ============
 
@@ -58,8 +77,10 @@ builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddSingleton<IJwtService, JwtService>();
 builder.Services.AddSingleton<ITokenBlacklistService, TokenBlacklistService>();
+builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
 builder.Services.AddSingleton<IConsoleService, ConsoleService>();
 builder.Services.AddScoped<IPermissionService, PermissionService>();
+builder.Services.AddSingleton<ISystemMonitorService, SystemMonitorService>();
 
 // 后台服务
 builder.Services.AddHostedService<InitializationService>();
@@ -86,10 +107,10 @@ builder.Services.AddAuthentication(options =>
         ClockSkew = TimeSpan.Zero
     };
 
-    // Token 黑名单检查
+    // Token 黑名单检查 + 用户状态检查
     options.Events = new JwtBearerEvents
     {
-        OnTokenValidated = context =>
+        OnTokenValidated = async context =>
         {
             var jti = context.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
             if (jti != null)
@@ -98,9 +119,22 @@ builder.Services.AddAuthentication(options =>
                 if (blacklistService.IsBlacklisted(jti))
                 {
                     context.Fail("Token has been revoked");
+                    return;
                 }
             }
-            return Task.CompletedTask;
+
+            // 检查用户状态：已删除或已封禁的用户 Token 无效
+            var userIdClaim = context.Principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (userIdClaim != null && ulong.TryParse(userIdClaim, out var userId))
+            {
+                var userService = context.HttpContext.RequestServices.GetRequiredService<IUserService>();
+                var user = await userService.GetByIdAsync(userId);
+                if (user == null || user.Status == UserManagementSystem.Models.UserStatus.Deleted || user.Status == UserManagementSystem.Models.UserStatus.Banned)
+                {
+                    context.Fail("User account is not active");
+                    return;
+                }
+            }
         }
     };
 });
@@ -227,7 +261,7 @@ app.MapPermissionEndpoints();
 app.MapUserGroupEndpoints();
 
 // 健康检查端点
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
+app.MapGet("/health", () => Results.Ok(new ApiResponse(ResultCodes.Success, "healthy", new { status = "healthy", timestamp = DateTime.UtcNow })));
 
 // 打印服务器启动信息
 var urls = app.Urls.Any() ? app.Urls.First() : "http://localhost:5000";

@@ -49,8 +49,8 @@ public class PermissionService : IPermissionService
     {
         var cacheKey = $"user_permissions_{userId}";
 
-        if (_cache.TryGetValue(cacheKey, out List<string>? cachedPermissions))
-            return cachedPermissions!;
+        if (_cache.TryGetValue(cacheKey, out List<string>? cachedPermissions) && cachedPermissions != null)
+            return cachedPermissions;
 
         var groupIds = await _context.UserGroupMembers
             .Where(m => m.UserId == userId)
@@ -62,7 +62,6 @@ public class PermissionService : IPermissionService
 
         var permissionCodes = await _context.UserGroupPermissions
             .Where(gp => groupIds.Contains(gp.GroupId))
-            .Include(gp => gp.Permission)
             .Select(gp => gp.Permission.Code)
             .Distinct()
             .ToListAsync();
@@ -227,12 +226,72 @@ public class PermissionService : IPermissionService
 
     public async Task<bool> RemoveMemberAsync(ulong groupId, ulong userId)
     {
+        // 系统初始用户 (uid=0) 不可从任何用户组移除
+        if (userId == 0)
+            return false;
+
         var member = await _context.UserGroupMembers
             .FirstOrDefaultAsync(m => m.GroupId == groupId && m.UserId == userId);
 
         if (member == null) return false;
 
         _context.UserGroupMembers.Remove(member);
+        await _context.SaveChangesAsync();
+        await InvalidateUserPermissionCacheAsync(userId);
+        return true;
+    }
+
+    public async Task<bool> SetUserGroupsAsync(ulong userId, List<ulong> groupIds)
+    {
+        var distinctIds = groupIds.Distinct().ToList();
+
+        // 验证所有用户组存在
+        var existingGroupIds = await _context.UserGroups
+            .Where(g => distinctIds.Contains(g.Id))
+            .Select(g => g.Id)
+            .ToListAsync();
+        if (existingGroupIds.Count != distinctIds.Count)
+            return false;
+
+        // 获取当前成员关系
+        var currentMemberships = await _context.UserGroupMembers
+            .Where(m => m.UserId == userId)
+            .ToListAsync();
+        var currentGroupIds = currentMemberships.Select(m => m.GroupId).ToHashSet();
+
+        // uid=0 不能被移出初始用户组
+        if (userId == 0)
+        {
+            var initialGroup = await GetGroupByNameAsync(PermissionCodes.InitialGroupName);
+            if (initialGroup != null && !distinctIds.Contains(initialGroup.Id))
+            {
+                distinctIds.Add(initialGroup.Id);
+            }
+        }
+
+        // 移除不再需要的组
+        var toRemove = currentMemberships
+            .Where(m => !distinctIds.Contains(m.GroupId))
+            .ToList();
+        if (toRemove.Any())
+        {
+            _context.UserGroupMembers.RemoveRange(toRemove);
+        }
+
+        // 添加新的组
+        foreach (var groupId in distinctIds)
+        {
+            if (!currentGroupIds.Contains(groupId))
+            {
+                _context.UserGroupMembers.Add(new UserGroupMember
+                {
+                    GroupId = groupId,
+                    UserId = userId,
+                    JoinedAt = DateTime.UtcNow
+                });
+            }
+        }
+
         await _context.SaveChangesAsync();
         await InvalidateUserPermissionCacheAsync(userId);
         return true;
@@ -247,12 +306,14 @@ public class PermissionService : IPermissionService
             .ToListAsync();
     }
 
-    public async Task<List<UserGroup>> GetUserGroupsAsync(ulong userId)
+    public async Task<List<UserGroupMember>> GetUserGroupsAsync(ulong userId)
     {
         return await _context.UserGroupMembers
             .Where(m => m.UserId == userId)
             .Include(m => m.Group)
-            .Select(m => m.Group)
+                .ThenInclude(g => g.Members)
+            .Include(m => m.Group)
+                .ThenInclude(g => g.GroupPermissions)
             .ToListAsync();
     }
 

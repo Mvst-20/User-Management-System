@@ -7,7 +7,7 @@
 - **用户认证**：JWT Bearer Token 认证，支持 Token 过期配置
 - **密码安全**：BCrypt 哈希存储（Work Factor 12），防止暴力破解
 - **邮箱验证**：完整的注册验证和邮箱修改流程，支持频率限制
-- **头像管理**：支持上传、下载、删除用户头像（路径遍历防护）
+- **头像管理**：支持上传、下载、删除用户头像（路径遍历防护 + 图片压缩 + 缩略图）
 - **在线状态**：基于内存的在线用户跟踪，自动过期清理
 - **权限体系**：基于用户组的细粒度权限控制，支持 A/B/C 特殊权限
 - **用户组管理**：支持创建、编辑、删除用户组及分配权限和成员
@@ -17,7 +17,7 @@
 - **注册限流**：防止批量注册攻击
 - **登录防护**：基于 IP + 账号的双重暴力破解防护（IP 20次/5分钟，账号 5次/5分钟）
 - **Token 撤销**：JWT Token 黑名单机制，登出和密码修改时自动撤销当前 Token
-- **头像验证**：上传时验证文件魔数签名（magic bytes），防止 Content-Type 伪装
+- **头像验证**：上传时验证文件魔数签名（magic bytes），防止 Content-Type 伪装；大于 512KB 自动压缩并生成缩略图
 - **密码安全策略**：密码修改后强制下线并撤销当前 Token，需重新登录
 - **异常处理**：统一异常中间件，生产环境隐藏内部错误信息
 
@@ -29,6 +29,7 @@
 - JWT Bearer Authentication
 - MailKit (SMTP 邮件发送)
 - BCrypt.Net-Next
+- SixLabors.ImageSharp
 
 ## 快速开始
 
@@ -62,7 +63,7 @@
 }
 ```
 
-> 端口 587 自动使用 STARTTLS，端口 465 自动使用 SSL 直连。
+> 端口 587 自动使用 STARTTLS，端口 465 自动使用 SSL 直连，其他端口默认使用 STARTTLS（可通过 `UseSsl: false` 禁用）。
 
 ### 3. 配置 JWT
 
@@ -107,7 +108,21 @@
 - 开发环境使用 `http://localhost:5000`
 - **生产环境必须使用 HTTPS**
 
-### 6. 运行
+### 6. 配置应用参数
+
+```json
+{
+  "AppSettings": {
+    "TokenExpiryMinutes": 20,
+    "AdminPasswordLength": 12
+  }
+}
+```
+
+- `TokenExpiryMinutes`：邮箱验证 Token 的有效期（分钟），默认 20 分钟
+- `AdminPasswordLength`：首次启动时自动生成的管理员和系统用户密码长度，默认 12 位
+
+### 7. 运行
 
 ```bash
 # 开发环境
@@ -143,6 +158,8 @@ dotnet run --environment Production
 ### 概述
 
 系统采用**基于用户组的权限控制**模型：每个 API 端点对应一个权限代码，用户通过其所属的用户组获取权限。调用 API 时，系统检查用户所属用户组是否拥有该 API 对应的权限。
+
+> 用户可同时属于多个用户组，最终权限为所有组权限的并集。系统初始用户（uid=0）始终保留在"初始用户"组中，不可移除。
 
 ### 特殊权限
 
@@ -214,10 +231,11 @@ dotnet run --environment Production
 |------|------|------|-------------|
 | POST | `/api/users/register` | 用户注册 | `{username, email, password, extras?}` |
 | POST | `/api/users/login` | 用户登录 | `{login, password}` |
+| POST | `/api/users/refresh` | 刷新 Token（免登录） | `{refreshToken}` |
 | GET | `/api/users/verify-email` | 验证邮箱 | Query: `?token=xxx` |
 | POST | `/api/users/resend-verification` | 重新发送验证邮件 | `{email}` |
 | GET | `/api/users/verify-email-change` | 确认修改邮箱 | Query: `?token=xxx` |
-| GET | `/api/avatars/{filename}` | 获取头像 | - |
+| GET | `/api/avatars/{filename}` | 获取头像（支持 `?type=thumb` 获取缩略图） | - |
 | GET | `/api/permissions/custom` | 获取自定义权限列表 | - |
 | GET | `/health` | 健康检查 | - |
 
@@ -225,7 +243,6 @@ dotnet run --environment Production
 - `username`：3-64 个字符
 - `email`：有效邮箱格式，最大 128 字符
 - `password`：8-128 个字符
-- `phone`：最大 20 个字符
 
 **注册限流**：同一邮箱每分钟最多 5 次注册请求。
 
@@ -236,6 +253,8 @@ dotnet run --environment Production
 | 方法 | 路由 | 描述 | 所需权限 | allowSelf |
 |------|------|------|---------|-----------|
 | GET | `/api/users/{id}` | 获取用户信息 | `user:read` | 是 |
+| GET | `/api/users/{id}/groups` | 获取用户所属用户组 | `user:read` | 是 |
+| PUT | `/api/users/{id}/groups` | 批量设置用户所属用户组 | `user-group:manage-members` | 否 |
 | PUT | `/api/users/{id}` | 完全更新用户 | `user:update` | 是 |
 | PATCH | `/api/users/{id}` | 部分更新用户 | `user:update` | 是 |
 | DELETE | `/api/users/{id}` | 软删除用户 | `user:delete` | 否 |
@@ -250,12 +269,15 @@ dotnet run --environment Production
 
 > **邮箱修改**：普通用户不能通过 PUT/PATCH 直接修改邮箱，必须通过 change-email 流程（验证密码 → 发送验证邮件 → 确认修改）。管理员可直接通过 PUT 修改。
 
-> **头像上传**：仅支持 JPG/PNG/GIF/WebP 格式，最大 5MB。
+> **手机号**：仅在 PUT/PATCH 更新时支持，最大 20 字符。注册时暂不支持。
+
+> **头像上传**：仅支持 JPG/PNG/GIF/WebP 格式，最大 6MB。文件大于 512KB 时自动压缩并生成缩略图（256px），小于等于 512KB 时不压缩（缩略图 = 原图）。获取头像时可通过 `?type=thumb` 参数获取缩略图。
 
 ### 管理员端点（需要认证 + 权限）
 
 | 方法 | 路由 | 描述 | 所需权限 | 特殊覆盖 |
 |------|------|------|---------|---------|
+| GET | `/api/admin/stats/total-users` | 总用户数量（排除已删除） | `admin:stats` | C 权限 |
 | GET | `/api/admin/stats/online-users` | 在线用户数量 | `admin:stats` | C 权限 |
 | GET | `/api/admin/stats/new-users` | 新注册用户数 | `admin:stats` | C 权限 |
 | GET | `/api/admin/stats/active-users` | 活跃用户数 | `admin:stats` | C 权限 |
@@ -333,7 +355,7 @@ dotnet run --environment Production
 |------|------|---------|
 | 0xx | 通用 | 0=成功, 1=错误, 2=验证错误, 3=未授权, 4=禁止, 5=不存在, 6=内部错误, 7=频率限制 |
 | 1xx | 注册 | 100=成功, 101=用户名存在, 102=邮箱已注册, 103=手机号已使用 |
-| 2xx | 登录 | 200=成功, 201=用户名或密码错误, 203=账号已注销, 204=账号被封禁或未验证, 205=登录频繁限制, 206=账号已被封禁 |
+| 2xx | 登录 | 200=成功, 201=用户名或密码错误, 203=账号已注销, 204=账号被封禁, 205=登录频繁限制, 206=账号已被封禁, 207=账号未验证 |
 | 3xx | 邮箱验证 | 300=成功, 301=无效链接, 302=链接过期, 303=无效类型, 304=用户不存在, 310=重发成功, 311=频率限制, 312=用户不存在, 313=已验证 |
 | 4xx | 邮箱修改 | 400=请求成功, 401=邮箱相同, 402=邮箱已使用, 403=密码错误, 410=确认成功, 411=无效链接, 412=链接过期, 413=无效新邮箱 |
 | 5xx | 密码修改 | 500=成功, 501=当前密码错误, 502=新旧密码相同 |
@@ -353,23 +375,14 @@ dotnet run --environment Production
 | 3 | Unverified | 待验证，已注册但未验证邮箱 |
 | 4 | Deleted | 软删除，账号已注销 |
 
-## 用户角色
-
-| 值 | 名称 | 说明 |
-|----|------|------|
-| 1 | User | 普通用户，基本权限 |
-| 2 | Admin | 管理员，管理用户、查看统计等 |
-
-> 用户角色是基础分类，实际权限由用户组决定。
-
 ## 数据库表
 
 | 表名 | 说明 |
 |------|------|
-| `users` | 用户表 |
+| `users` | 用户表（含自定义 JSON 扩展字段 `extras`） |
 | `email_verification_tokens` | 邮箱验证令牌表 |
-| `permissions` | 权限表（含特殊权限 A/B/C 和各 API 权限） |
-| `user_groups` | 用户组表（含自定义 JSON 扩展字段 `extras`） |
+| `permissions` | 权限表（含特殊权限 A/B/C 和各 API 权限，`creator_id` 记录创建人） |
+| `user_groups` | 用户组表（含自定义 JSON 扩展字段 `extras`，`is_member_locked` 标记成员锁定） |
 | `user_group_members` | 用户组成员关联表 |
 | `user_group_permissions` | 用户组权限关联表 |
 
@@ -423,13 +436,18 @@ UCS/
 11. 封禁用户无法登录，也无法获取 JWT Token
 12. 头像端点已做路径遍历防护
 13. 头像上传验证文件魔数签名（magic bytes），防止 Content-Type 伪装
-14. 登录暴力破解防护：IP 20次/5分钟 + 账号 5次/5分钟双重限流
-15. JWT Token 支持黑名单撤销，登出和密码修改时自动撤销当前 Token
-16. 密码修改后强制下线并撤销当前 Token，需重新登录
-17. 异常中间件在生产环境隐藏内部错误详情
-18. A 权限仅限"初始用户"组，无法分配给其他用户组
-19. 特殊权限（A/B/C）不可通过 API 创建、修改或删除
-20. 权限检查结果带内存缓存（5 分钟过期），修改权限后自动清除对应用户缓存
+14. 头像大于 512KB 时自动压缩，生成 256px 缩略图，减少存储和传输开销
+15. 登录暴力破解防护：IP 20次/5分钟 + 账号 5次/5分钟双重限流
+16. JWT Token 支持黑名单撤销，登出和密码修改时自动撤销当前 Token 和 Refresh Token
+17. 支持 Refresh Token 机制（30 天有效），免密刷新 Access Token
+18. 异常中间件在生产环境隐藏内部错误详情
+19. A 权限仅限"初始用户"组，无法分配给其他用户组
+20. 特殊权限（A/B/C）不可通过 API 创建、修改或删除
+21. 权限检查结果带内存缓存（5 分钟过期），修改权限后自动清除对应用户缓存
+22. 自定义权限记录创建人（`creator_id`），系统内置权限创建人为 null
+23. 系统初始用户（uid=0）不可删除、不可修改、不可从初始用户组移除
+24. 启动时自动检查 uid=0 是否在初始用户组，若不在则自动修复
+25. SMTP 连接默认使用加密（端口 587=STARTTLS，465=SSL，其他端口默认 STARTTLS）
 
 ## 许可证
 

@@ -11,6 +11,45 @@ namespace UserManagementSystem.Endpoints;
 
 public static class UserEndpoints
 {
+    private static readonly object _rateLimitLock = new object();
+
+    /// <summary>
+    /// 原子化的速率限制检查：检查限制并在允许时递增计数
+    /// </summary>
+    /// <returns>如果超过限制返回 true，否则返回 false</returns>
+    private static bool IsRateLimited(IMemoryCache cache, string key, int maxAttempts, TimeSpan window)
+    {
+        lock (_rateLimitLock)
+        {
+            var count = 0;
+            if (cache.TryGetValue(key, out int currentCount))
+            {
+                count = currentCount;
+            }
+
+            if (count >= maxAttempts)
+            {
+                return true;
+            }
+
+            cache.Set(key, count + 1, window);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 验证用户状态：检查用户是否存在、是否被软删除、是否被封禁
+    /// </summary>
+    /// <returns>如果用户状态异常则返回对应的 IResult，否则返回 null 表示用户状态正常</returns>
+    private static IResult? ValidateUserStatus(User? user)
+    {
+        if (user == null || user.Status == UserStatus.Deleted)
+            return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
+        if (user.Status == UserStatus.Banned)
+            return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
+        return null;
+    }
+
     public static void MapUserEndpoints(this WebApplication app)
     {
         // ============ 公开端点（不需要权限检查）============
@@ -21,19 +60,13 @@ public static class UserEndpoints
             [FromServices] IUserService userService,
             [FromServices] ITokenService tokenService,
             [FromServices] IEmailService emailService,
-            [FromServices] IOnlineUserService onlineUserService,
             [FromServices] IPermissionService permissionService,
             [FromServices] IMemoryCache cache,
             [FromServices] ILogger<Program> logger) =>
         {
             // 注册速率限制（同一邮箱每分钟最多5次）
             var rateLimitKey = $"register_rate_{request.Email}";
-            var registrationCount = 0;
-            if (cache.TryGetValue(rateLimitKey, out int count))
-            {
-                registrationCount = count;
-            }
-            if (registrationCount >= 5)
+            if (IsRateLimited(cache, rateLimitKey, 5, TimeSpan.FromMinutes(1)))
             {
                 return Results.Json(new ApiResponse(ResultCodes.TooManyRequests, "请求过于频繁，请稍后再试"), statusCode: 429);
             }
@@ -57,7 +90,6 @@ public static class UserEndpoints
                 Email = request.Email,
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password, 12),
                 Status = UserStatus.Unverified,
-                Role = UserRole.User,
                 CreatedAt = DateTime.UtcNow,
                 Extras = request.Extras?.GetRawText()
             };
@@ -86,9 +118,6 @@ public static class UserEndpoints
                 logger.LogError(ex, "Failed to send verification email to {Email}", user.Email);
             }
 
-            // 更新速率限制
-            cache.Set(rateLimitKey, registrationCount + 1, TimeSpan.FromMinutes(1));
-
             var message = emailSent
                 ? "注册成功，请查收验证邮件"
                 : "注册成功，但验证邮件发送失败，请稍后重新发送验证邮件";
@@ -102,6 +131,7 @@ public static class UserEndpoints
             [FromBody] LoginRequest request,
             [FromServices] IUserService userService,
             [FromServices] IJwtService jwtService,
+            [FromServices] IRefreshTokenService refreshTokenService,
             [FromServices] IOnlineUserService onlineUserService,
             [FromServices] IMemoryCache cache,
             [FromServices] AppConfiguration appConfig,
@@ -114,26 +144,18 @@ public static class UserEndpoints
             var accountKey = $"login_account_{loginKey}";
 
             // IP 限流：同一 IP 5 分钟内最多 20 次失败
-            var ipFails = 0;
-            if (cache.TryGetValue(ipKey, out int ipCount))
-                ipFails = ipCount;
-            if (ipFails >= 20)
+            if (IsRateLimited(cache, ipKey, 20, TimeSpan.FromMinutes(5)))
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
 
             // 账号限流：同一账号 5 分钟内最多 5 次失败
-            var accountFails = 0;
-            if (cache.TryGetValue(accountKey, out int accountCount))
-                accountFails = accountCount;
-            if (accountFails >= 5)
+            if (IsRateLimited(cache, accountKey, 5, TimeSpan.FromMinutes(5)))
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
 
             var user = await userService.ValidateCredentialsAsync(request.Login ?? string.Empty, request.Password);
 
             if (user == null)
             {
-                // 登录失败，递增计数
-                cache.Set(ipKey, ipFails + 1, TimeSpan.FromMinutes(5));
-                cache.Set(accountKey, accountFails + 1, TimeSpan.FromMinutes(5));
+                // 登录失败，递增计数已在 IsRateLimited 中完成
                 return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_UserNotFound, "用户名或密码错误"));
             }
 
@@ -149,7 +171,7 @@ public static class UserEndpoints
 
             if (user.Status == UserStatus.Unverified)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountBanned, "账号未验证，请先验证邮箱"));
+                return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountUnverified, "账号未验证，请先验证邮箱"));
             }
 
             // 更新最后登录信息
@@ -160,12 +182,41 @@ public static class UserEndpoints
             // 标记用户在线
             onlineUserService.MarkUserOnline(user.Id.ToString());
 
-            // 生成Token
+            // 生成 Access Token 和 Refresh Token
             var jwtToken = jwtService.GenerateToken(user);
+            var refreshToken = await refreshTokenService.GenerateAsync(user.Id);
 
-            var loginData = new LoginDataResponse(jwtToken, "Bearer", appConfig.Jwt.ExpiryMinutes, user.ToResponse());
+            var loginData = new LoginDataResponse(jwtToken, "Bearer", appConfig.Jwt.ExpiryMinutes,
+                user.ToResponse(), refreshToken, 2592000); // 30 days
 
             return Results.Ok(new ApiResponse(ResultCodes.LoginSuccess, "登录成功", loginData));
+        });
+
+        // 刷新 Access Token（使用 Refresh Token，无需重新登录）
+        app.MapPost("/api/users/refresh", async (
+            [FromBody] RefreshTokenRequest request,
+            [FromServices] IRefreshTokenService refreshTokenService,
+            [FromServices] IJwtService jwtService,
+            [FromServices] AppConfiguration appConfig) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.RefreshToken))
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "Refresh Token 不能为空"));
+            }
+
+            var user = await refreshTokenService.ValidateAsync(request.RefreshToken);
+            if (user == null)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "Refresh Token 无效或已过期"), statusCode: 401);
+            }
+
+            var jwtToken = jwtService.GenerateToken(user);
+            var newRefreshToken = await refreshTokenService.GenerateAsync(user.Id);
+
+            var data = new LoginDataResponse(jwtToken, "Bearer", appConfig.Jwt.ExpiryMinutes,
+                user.ToResponse(), newRefreshToken, 2592000);
+
+            return Results.Ok(new ApiResponse(ResultCodes.LoginSuccess, "Token 已刷新", data));
         });
 
         // 验证邮箱
@@ -268,25 +319,70 @@ public static class UserEndpoints
             return Results.Ok(new ApiResponse(ResultCodes.GetUserSuccess, "获取成功", user.ToResponse()));
         }).RequireAuthorization().RequirePermission(PermissionCodes.UserRead, allowSelf: true);
 
+        // 获取用户所属的用户组
+        app.MapGet("/api/users/{id}/groups", async (
+            ulong id,
+            [FromServices] IUserService userService,
+            [FromServices] IPermissionService permissionService) =>
+        {
+            var user = await userService.GetByIdAsync(id);
+            if (user == null || user.Status == UserStatus.Deleted)
+            {
+                return Results.NotFound(new ApiResponse(ResultCodes.GetUserFail_NotFound, "用户不存在"));
+            }
+
+            var groupMembers = await permissionService.GetUserGroupsAsync(id);
+            var result = groupMembers.Select(gm => new UserGroupResponse(
+                gm.Group.Id, gm.Group.Name, gm.Group.Description, gm.Group.IsProtected, gm.Group.IsMemberLocked,
+                gm.Group.Members.Count, gm.Group.GroupPermissions.Count
+            )).ToList();
+
+            return Results.Ok(new ApiResponse(ResultCodes.GetUserSuccess, "获取成功", result));
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserRead, allowSelf: true);
+
+        // 批量设置用户所属用户组（替换现存所有组，uid=0 除外）
+        app.MapPut("/api/users/{id}/groups", async (
+            ulong id,
+            [FromBody] SetUserGroupsRequest request,
+            [FromServices] IUserService userService,
+            [FromServices] IPermissionService permissionService) =>
+        {
+            var user = await userService.GetByIdAsync(id);
+            if (user == null || user.Status == UserStatus.Deleted)
+            {
+                return Results.NotFound(new ApiResponse(ResultCodes.GetUserFail_NotFound, "用户不存在"));
+            }
+
+            if (id == 0)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.UserGroupMemberLocked, "系统初始用户的用户组不可编辑"), statusCode: 403);
+            }
+
+            var success = await permissionService.SetUserGroupsAsync(id, request.GroupIds);
+            if (!success)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.Error, "设置失败，请检查用户组ID是否有效"));
+            }
+
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "设置成功"));
+        }).RequireAuthorization().RequirePermission(PermissionCodes.UserGroupManageMembers);
+
         // 完全更新用户信息（允许更新自己，更新他人需要 user:update 权限）
         app.MapPut("/api/users/{id}", async (
             ulong id,
             [FromBody] UpdateUserRequest request,
             [FromServices] IUserService userService,
-            [FromServices] IPermissionService permissionService,
             HttpContext httpContext) =>
         {
+            // 保护系统初始用户 (uid=0) 的核心信息不被修改
+            if (id == 0)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.UpdateUserFail_Forbidden, "系统初始用户信息不可修改"), statusCode: 403);
+            }
+
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             // 检查用户名唯一性（排除已软删除用户）
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
@@ -322,16 +418,6 @@ public static class UserEndpoints
                 user.Phone = request.Phone;
             }
 
-            // 角色变更是敏感操作，需要 user:delete 权限
-            if (request.Role.HasValue)
-            {
-                var currentUserId = httpContext.User.GetUserId()!.Value;
-                if (await permissionService.HasPermissionAsync(currentUserId, PermissionCodes.UserDelete))
-                {
-                    user.Role = (UserRole)request.Role.Value;
-                }
-            }
-
             if (request.Extras.HasValue)
             {
                 user.Extras = request.Extras.Value.GetRawText();
@@ -348,17 +434,15 @@ public static class UserEndpoints
             [FromBody] PatchUserRequest request,
             [FromServices] IUserService userService) =>
         {
+            // 保护系统初始用户 (uid=0) 的核心信息不被修改
+            if (id == 0)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.UpdateUserFail_Forbidden, "系统初始用户信息不可修改"), statusCode: 403);
+            }
+
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
             {
@@ -392,8 +476,22 @@ public static class UserEndpoints
         app.MapDelete("/api/users/{id}", async (
             ulong id,
             [FromServices] IUserService userService,
-            [FromServices] IOnlineUserService onlineUserService) =>
+            [FromServices] IOnlineUserService onlineUserService,
+            HttpContext httpContext) =>
         {
+            // 保护系统初始用户 (uid=0) 不被删除
+            if (id == 0)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.DeleteUserFail_Forbidden, "系统初始用户不可删除"), statusCode: 403);
+            }
+
+            // 防止用户删除自己
+            var currentUserId = httpContext.User.GetUserId();
+            if (currentUserId.HasValue && currentUserId.Value == id)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.DeleteUserFail_SelfDelete, "不能删除自己的账号"));
+            }
+
             var result = await userService.DeleteUserAsync(id);
 
             if (!result)
@@ -412,7 +510,6 @@ public static class UserEndpoints
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10,
             [FromQuery] int? status = null,
-            [FromQuery] int? role = null,
             [FromQuery] string? search = null) =>
         {
             // pageSize 上限保护
@@ -420,7 +517,7 @@ public static class UserEndpoints
             if (pageSize > 100) pageSize = 100;
             if (page < 1) page = 1;
 
-            var (users, totalCount) = await userService.GetUsersAsync(page, pageSize, status, role, search);
+            var (users, totalCount) = await userService.GetUsersAsync(page, pageSize, status, search);
 
             var response = new PagedApiResponse(
                 ResultCodes.GetUsersSuccess, "获取成功",
@@ -438,6 +535,7 @@ public static class UserEndpoints
             [FromServices] IUserService userService,
             [FromServices] IOnlineUserService onlineUserService,
             [FromServices] ITokenBlacklistService tokenBlacklistService,
+            [FromServices] IRefreshTokenService refreshTokenService,
             [FromServices] AppConfiguration appConfig,
             HttpContext httpContext) =>
         {
@@ -448,16 +546,8 @@ public static class UserEndpoints
             }
 
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash))
             {
@@ -472,10 +562,11 @@ public static class UserEndpoints
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword, 12);
             await userService.UpdateUserAsync(user);
 
-            // 标记用户离线
+            // 标记用户离线，撤销 Refresh Token
             onlineUserService.MarkUserOffline(id.ToString());
+            await refreshTokenService.RevokeAsync(id);
 
-            // 撤销当前 Token，强制重新登录
+            // 撤销当前 Access Token，强制重新登录
             var jti = httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
             if (jti != null)
             {
@@ -502,16 +593,8 @@ public static class UserEndpoints
             }
 
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             if (request.NewEmail == user.Email)
             {
@@ -595,9 +678,10 @@ public static class UserEndpoints
         });
 
         // 用户登出
-        app.MapPost("/api/users/logout", (
+        app.MapPost("/api/users/logout", async (
             [FromServices] IOnlineUserService onlineUserService,
             [FromServices] ITokenBlacklistService tokenBlacklistService,
+            [FromServices] IRefreshTokenService refreshTokenService,
             [FromServices] AppConfiguration appConfig,
             HttpContext httpContext) =>
         {
@@ -605,6 +689,7 @@ public static class UserEndpoints
             if (userId.HasValue)
             {
                 onlineUserService.MarkUserOffline(userId.Value.ToString());
+                await refreshTokenService.RevokeAsync(userId.Value);
             }
 
             // 撤销当前 Token

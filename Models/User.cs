@@ -11,12 +11,6 @@ public enum UserStatus
     Deleted = 4      // 软删除
 }
 
-public enum UserRole
-{
-    User = 1,        // 普通用户
-    Admin = 2        // 管理员
-}
-
 public enum VerificationTokenType
 {
     Registration = 1,   // 注册验证
@@ -52,9 +46,6 @@ public class User
     [Column("status")]
     public UserStatus Status { get; set; } = UserStatus.Unverified;
 
-    [Column("role")]
-    public UserRole Role { get; set; } = UserRole.User;
-
     [MaxLength(512)]
     [Column("avatar_url")]
     public string? AvatarUrl { get; set; }
@@ -74,6 +65,19 @@ public class User
 
     [Column("extras", TypeName = "json")]
     public string? Extras { get; set; }
+
+    /// <summary>
+    /// Refresh Token 哈希值，用于长期保持登录状态
+    /// </summary>
+    [MaxLength(128)]
+    [Column("refresh_token")]
+    public string? RefreshToken { get; set; }
+
+    /// <summary>
+    /// Refresh Token 过期时间
+    /// </summary>
+    [Column("refresh_token_expires_at")]
+    public DateTime? RefreshTokenExpiresAt { get; set; }
 
     public virtual ICollection<EmailVerificationToken> VerificationTokens { get; set; } = new List<EmailVerificationToken>();
 }

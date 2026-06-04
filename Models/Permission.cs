@@ -38,6 +38,14 @@ public class Permission
     [Column("description")]
     public string? Description { get; set; }
 
+    /// <summary>
+    /// 创建人ID，系统内置权限为null
+    /// </summary>
+    [Column("creator_id")]
+    public ulong? CreatorId { get; set; }
+
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    public virtual User? Creator { get; set; }
 }

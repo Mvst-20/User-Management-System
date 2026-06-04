@@ -17,7 +17,10 @@ public static class UserExtensions
                 using var doc = JsonDocument.Parse(user.Extras);
                 extras = doc.RootElement.Clone();
             }
-            catch { }
+            catch
+            {
+                // JSON解析失败时静默忽略，extras将为null
+            }
         }
 
         return new UserResponse(
@@ -26,7 +29,6 @@ public static class UserExtensions
             user.Email,
             user.Phone,
             (int)user.Status,
-            (int)user.Role,
             user.AvatarUrl,
             user.LastLoginIp,
             user.LastLoginAt,
@@ -40,18 +42,6 @@ public static class UserExtensions
     {
         var claim = principal.FindFirst(ClaimTypes.NameIdentifier);
         return claim != null && ulong.TryParse(claim.Value, out var id) ? id : null;
-    }
-
-    public static UserRole? GetUserRole(this ClaimsPrincipal principal)
-    {
-        var claim = principal.FindFirst(ClaimTypes.Role);
-        return claim != null && Enum.TryParse<UserRole>(claim.Value, out var role) ? role : null;
-    }
-
-    public static UserStatus? GetUserStatus(this ClaimsPrincipal principal)
-    {
-        var claim = principal.FindFirst("status");
-        return claim != null && int.TryParse(claim.Value, out var status) ? (UserStatus)status : null;
     }
 
     public static bool IsOwnResource(this ClaimsPrincipal principal, ulong resourceUserId)

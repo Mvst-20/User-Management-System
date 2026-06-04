@@ -58,8 +58,6 @@ public record UpdateUserRequest(
     [StringLength(20, ErrorMessage = "手机号长度不能超过20个字符")]
     string? Phone = null,
 
-    int? Role = null,
-
     JsonElement? Extras = null
 );
 
@@ -77,6 +75,11 @@ public record ResendVerificationRequest(
     [Required(ErrorMessage = "邮箱不能为空")]
     [EmailAddress(ErrorMessage = "邮箱格式不正确")]
     string Email
+);
+
+public record RefreshTokenRequest(
+    [Required(ErrorMessage = "Refresh Token 不能为空")]
+    string RefreshToken
 );
 
 public record SendEmailRequest(
@@ -100,7 +103,6 @@ public record UserResponse(
     string Email,
     string? Phone,
     int Status,
-    int Role,
     string? AvatarUrl,
     string? LastLoginIp,
     DateTime? LastLoginAt,
@@ -113,7 +115,9 @@ public record LoginDataResponse(
     string Token,
     string TokenType,
     int ExpiresIn,
-    UserResponse User
+    UserResponse User,
+    string? RefreshToken = null,
+    int RefreshTokenExpiresIn = 2592000
 );
 
 public record RegisterDataResponse(
@@ -125,12 +129,21 @@ public record AvatarDataResponse(
     string AvatarUrl
 );
 
+public record AvatarUploadDataResponse(
+    string AvatarUrl,
+    bool HasThumbnail
+);
+
 public record ServerStatusResponse(
     string Uptime,
     double CpuUsage,
     double MemoryUsage,
     long MemoryUsedBytes,
     long MemoryTotalBytes,
+    long NetworkBytesSent,
+    long NetworkBytesReceived,
+    double NetworkSendRate,
+    double NetworkReceiveRate,
     DateTime ServerTime,
     string DatabaseStatus,
     string Version

@@ -21,6 +21,14 @@ public static class AdminEndpoints
             return Results.Ok(new ApiResponse(ResultCodes.AdminStatsSuccess, "获取成功", new { OnlineUsers = count }));
         }).RequireAuthorization().RequirePermission(PermissionCodes.AdminStats);
 
+        // 总用户数量（排除已删除用户）
+        app.MapGet("/api/admin/stats/total-users", async (
+            [FromServices] IUserService userService) =>
+        {
+            var count = await userService.GetTotalUsersCountAsync();
+            return Results.Ok(new ApiResponse(ResultCodes.AdminStatsSuccess, "获取成功", new { TotalUsers = count }));
+        }).RequireAuthorization().RequirePermission(PermissionCodes.AdminStats);
+
         // 新注册用户数量
         app.MapGet("/api/admin/stats/new-users", async (
             [FromQuery] int days,
@@ -63,19 +71,11 @@ public static class AdminEndpoints
 
         // 服务器状态（C 权限覆盖，或 admin:server 权限）
         app.MapGet("/api/admin/server/status", async (
-            [FromServices] IServiceProvider serviceProvider) =>
+            [FromServices] IServiceProvider serviceProvider,
+            [FromServices] ISystemMonitorService monitorService) =>
         {
-            var process = Process.GetCurrentProcess();
-            var startTime = process.StartTime.ToUniversalTime();
-            var uptime = DateTime.UtcNow - startTime;
-
-            // CPU 平均使用率 = (总处理器时间 / 运行时长) / 处理器核心数 * 100%
-            var cpuUsage = uptime.TotalMilliseconds > 0
-                ? (process.TotalProcessorTime.TotalMilliseconds / uptime.TotalMilliseconds) / Environment.ProcessorCount * 100.0
-                : 0;
-
-            var memoryUsed = process.WorkingSet64;
-            var memoryTotal = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            // 获取系统级监控数据
+            var status = monitorService.GetSystemStatus();
 
             string dbStatus;
             try
@@ -91,14 +91,18 @@ public static class AdminEndpoints
             }
 
             var response = new ServerStatusResponse(
-                $"{uptime.Days}d {uptime.Hours}h {uptime.Minutes}m {uptime.Seconds}s",
-                Math.Round(cpuUsage, 2),
-                Math.Round((double)memoryUsed / memoryTotal * 100, 2),
-                memoryUsed,
-                memoryTotal,
+                $"{status.Uptime.Days}d {status.Uptime.Hours}h {status.Uptime.Minutes}m {status.Uptime.Seconds}s",
+                status.CpuUsage,
+                status.MemoryUsage,
+                status.MemoryUsedBytes,
+                status.MemoryTotalBytes,
+                status.NetworkBytesSent,
+                status.NetworkBytesReceived,
+                status.NetworkSendRate,
+                status.NetworkReceiveRate,
                 DateTime.UtcNow,
                 dbStatus,
-                "1.0.0"
+                "v1.0.0"
             );
 
             return Results.Ok(new ApiResponse(ResultCodes.ServerStatusSuccess, "获取成功", response));
@@ -107,7 +111,8 @@ public static class AdminEndpoints
         // 发送测试邮件
         app.MapPost("/api/admin/email/test", async (
             [FromBody] SendEmailRequest request,
-            [FromServices] IEmailService emailService) =>
+            [FromServices] IEmailService emailService,
+            [FromServices] ILogger<Program> logger) =>
         {
             if (string.IsNullOrWhiteSpace(request.To))
             {
@@ -131,7 +136,8 @@ public static class AdminEndpoints
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.EmailSendFail, $"邮件发送失败: {ex.Message}"));
+                logger.LogError(ex, "Failed to send test email to {To}", request.To);
+                return Results.BadRequest(new ApiResponse(ResultCodes.EmailSendFail, "邮件发送失败，请检查 SMTP 配置"));
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.AdminServer);
     }

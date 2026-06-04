@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using UserManagementSystem.Data;
+using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Services;
@@ -54,6 +55,10 @@ public class UserService : IUserService
 
     public async Task<bool> DeleteUserAsync(ulong id)
     {
+        // 保护系统初始用户 (uid=0) 不被删除
+        if (id == 0)
+            return false;
+
         var user = await _context.Users.FindAsync(id);
         if (user == null) return false;
 
@@ -63,7 +68,7 @@ public class UserService : IUserService
     }
 
     public async Task<(List<User> Users, int TotalCount)> GetUsersAsync(
-        int page, int pageSize, int? status, int? role, string? search)
+        int page, int pageSize, int? status, string? search)
     {
         var query = _context.Users.AsQueryable();
 
@@ -74,11 +79,6 @@ public class UserService : IUserService
         else
         {
             query = query.Where(u => u.Status != UserStatus.Deleted);
-        }
-
-        if (role.HasValue)
-        {
-            query = query.Where(u => u.Role == (UserRole)role.Value);
         }
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -105,6 +105,13 @@ public class UserService : IUserService
         return _onlineUserService.GetOnlineUsersCount();
     }
 
+    public async Task<int> GetTotalUsersCountAsync()
+    {
+        return await _context.Users
+            .Where(u => u.Status != UserStatus.Deleted)
+            .CountAsync();
+    }
+
     public async Task<int> GetNewUsersCountAsync(int days)
     {
         var startDate = DateTime.UtcNow.AddDays(-days);
@@ -123,7 +130,10 @@ public class UserService : IUserService
 
     public async Task<bool> HasAdminAsync()
     {
-        return await _context.Users.AnyAsync(u => u.Role == UserRole.Admin);
+        // 检查是否已有用户被加入超级管理员组（排除系统用户 uid=0）
+        return await _context.UserGroupMembers
+            .Include(m => m.Group)
+            .AnyAsync(m => m.Group.Name == PermissionCodes.SuperAdminGroupName && m.UserId != 0);
     }
 
     public async Task<User?> ValidateCredentialsAsync(string login, string password)

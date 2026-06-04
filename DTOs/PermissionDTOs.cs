@@ -40,6 +40,7 @@ public record PermissionResponse(
     bool IsSpecial,
     bool IsSystem,
     string? Description,
+    ulong? CreatorId,
     DateTime CreatedAt
 );
 
@@ -80,6 +81,11 @@ public record UpdateUserGroupRequest(
 public record AddGroupMemberRequest(
     [Required(ErrorMessage = "用户ID不能为空")]
     ulong UserId
+);
+
+public record SetUserGroupsRequest(
+    [Required(ErrorMessage = "用户组ID列表不能为空")]
+    List<ulong> GroupIds
 );
 
 public record SetGroupPermissionsRequest(

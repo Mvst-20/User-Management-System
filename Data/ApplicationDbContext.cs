@@ -28,14 +28,11 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.Email).IsUnique();
             entity.HasIndex(e => e.Phone).IsUnique();
             entity.HasIndex(e => e.Status);
-            entity.HasIndex(e => e.Role);
             entity.HasIndex(e => e.LastLoginAt);
             entity.HasIndex(e => e.CreatedAt);
 
             entity.Property(e => e.Status)
                 .HasDefaultValue(UserStatus.Unverified);
-            entity.Property(e => e.Role)
-                .HasDefaultValue(UserRole.User);
             entity.Property(e => e.CreatedAt)
                 .HasColumnType("datetime")
                 .ValueGeneratedOnAdd();
@@ -63,9 +60,15 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.Code).IsUnique();
             entity.HasIndex(e => e.Category);
             entity.HasIndex(e => e.IsSystem);
+            entity.HasIndex(e => e.CreatorId);
             entity.Property(e => e.CreatedAt)
                 .HasColumnType("datetime")
                 .ValueGeneratedOnAdd();
+
+            entity.HasOne(e => e.Creator)
+                .WithMany()
+                .HasForeignKey(e => e.CreatorId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         // UserGroup entity configuration

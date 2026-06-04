@@ -28,6 +28,7 @@ public static class ResultCodes
     public const int LoginFail_AccountBanned = 204;  // 账号已被封禁
     public const int LoginFail_RateLimited = 205;    // 登录尝试过于频繁
     public const int AccountBanned = 206;            // 账号已被封禁
+    public const int LoginFail_AccountUnverified = 207; // 账号未验证
 
     // ============ 邮箱验证相关 (3xx) ============
     public const int EmailVerifySuccess = 300;       // 邮箱验证成功
@@ -66,6 +67,8 @@ public static class ResultCodes
     public const int UpdateUserFail_PhoneExists = 615;      // 手机号已被使用
     public const int DeleteUserSuccess = 620;          // 删除用户成功
     public const int DeleteUserFail_NotFound = 621;    // 用户不存在
+    public const int DeleteUserFail_Forbidden = 622;   // 禁止删除（系统用户）
+    public const int DeleteUserFail_SelfDelete = 623;  // 不能删除自己
     public const int GetUsersSuccess = 630;            // 获取用户列表成功
 
     // ============ 头像相关 (7xx) ============

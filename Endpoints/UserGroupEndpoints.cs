@@ -42,7 +42,8 @@ public static class UserGroupEndpoints
         // 获取用户组详情
         app.MapGet("/api/user-groups/{id}", async (
             ulong id,
-            [FromServices] IPermissionService permissionService) =>
+            [FromServices] IPermissionService permissionService,
+            [FromServices] ILogger<Program> logger) =>
         {
             var group = await permissionService.GetGroupByIdAsync(id);
             if (group == null)
@@ -61,14 +62,17 @@ public static class UserGroupEndpoints
                     using var doc = JsonDocument.Parse(group.Extras);
                     extras = doc.RootElement.Clone();
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse extras JSON for group {GroupId}", id);
+                }
             }
 
             var response = new UserGroupDetailResponse(
                 group.Id, group.Name, group.Description, group.IsProtected, group.IsMemberLocked,
                 members.Select(m => new GroupMemberResponse(m.UserId, m.User.Username, m.JoinedAt)).ToList(),
                 permissions.Select(p => new PermissionResponse(
-                    p.Id, p.Code, p.Name, p.Category, p.IsSpecial, p.IsSystem, p.Description, p.CreatedAt
+                    p.Id, p.Code, p.Name, p.Category, p.IsSpecial, p.IsSystem, p.Description, p.CreatorId, p.CreatedAt
                 )).ToList(),
                 extras
             );
@@ -213,6 +217,12 @@ public static class UserGroupEndpoints
             ulong userId,
             [FromServices] IPermissionService permissionService) =>
         {
+            // 系统初始用户 (uid=0) 不允许从任何用户组移除
+            if (userId == 0)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.UserGroupMemberLocked, "系统初始用户不可从用户组移除"), statusCode: 403);
+            }
+
             var group = await permissionService.GetGroupByIdAsync(id);
             if (group == null)
             {
@@ -249,9 +259,10 @@ public static class UserGroupEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UserGroupNotFound, "用户组不存在"));
             }
 
-            if (group.IsProtected)
+            // 只有成员锁定的用户组（如初始用户组）不可修改权限
+            if (group.IsMemberLocked)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupProtected, "受保护的用户组不可修改权限"));
+                return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupProtected, "该用户组权限不可修改"));
             }
 
             // A 权限只能分配给初始用户组
@@ -281,7 +292,8 @@ public static class UserGroupEndpoints
         // 获取用户组自定义字段
         app.MapGet("/api/user-groups/{id}/extras", async (
             ulong id,
-            [FromServices] IPermissionService permissionService) =>
+            [FromServices] IPermissionService permissionService,
+            [FromServices] ILogger<Program> logger) =>
         {
             var group = await permissionService.GetGroupByIdAsync(id);
             if (group == null)
@@ -297,7 +309,10 @@ public static class UserGroupEndpoints
                     using var doc = JsonDocument.Parse(group.Extras);
                     extras = doc.RootElement.Clone();
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse extras JSON for group {GroupId}", id);
+                }
             }
 
             return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功",
@@ -310,7 +325,8 @@ public static class UserGroupEndpoints
         app.MapPut("/api/user-groups/{id}/extras", async (
             ulong id,
             [FromBody] UpdateUserGroupExtrasRequest request,
-            [FromServices] IPermissionService permissionService) =>
+            [FromServices] IPermissionService permissionService,
+            [FromServices] ILogger<Program> logger) =>
         {
             var group = await permissionService.GetGroupByIdAsync(id);
             if (group == null)
@@ -338,7 +354,10 @@ public static class UserGroupEndpoints
                     using var doc = JsonDocument.Parse(updated.Extras);
                     result = doc.RootElement.Clone();
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse extras JSON for group {GroupId}", id);
+                }
             }
 
             return Results.Ok(new ApiResponse(ResultCodes.UserGroupExtrasUpdateSuccess, "更新成功",

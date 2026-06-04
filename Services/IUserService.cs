@@ -11,8 +11,9 @@ public interface IUserService
     Task<User> CreateUserAsync(User user);
     Task<User> UpdateUserAsync(User user);
     Task<bool> DeleteUserAsync(ulong id);
-    Task<(List<User> Users, int TotalCount)> GetUsersAsync(int page, int pageSize, int? status, int? role, string? search);
+    Task<(List<User> Users, int TotalCount)> GetUsersAsync(int page, int pageSize, int? status, string? search);
     int GetOnlineUsersCount();
+    Task<int> GetTotalUsersCountAsync();
     Task<int> GetNewUsersCountAsync(int days);
     Task<int> GetActiveUsersCountAsync(int days);
     Task<bool> HasAdminAsync();

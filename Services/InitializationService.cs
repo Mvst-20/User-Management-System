@@ -34,6 +34,7 @@ public class InitializationService : IHostedService
         await permissionService.SeedPermissionsAndGroupsAsync();
 
         // ============ 创建系统初始用户（uid=0）============
+        var initialGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.InitialGroupName);
         var systemUser = await context.Users.FirstOrDefaultAsync(u => u.Id == 0);
         if (systemUser == null)
         {
@@ -44,7 +45,6 @@ public class InitializationService : IHostedService
                 Username = "system",
                 Email = "system@internal.local",
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(systemPassword, 12),
-                Role = UserRole.Admin,
                 Status = UserStatus.Normal,
                 EmailVerifiedAt = DateTime.UtcNow,
                 CreatedAt = DateTime.UtcNow
@@ -64,13 +64,12 @@ public class InitializationService : IHostedService
                 try
                 {
                     await context.Database.ExecuteSqlRawAsync(
-                        "INSERT INTO users (id, username, email, password_hash, status, role, email_verified_at, created_at) " +
-                        "VALUES (0, {0}, {1}, {2}, {3}, {4}, {5}, {6})",
+                        "INSERT INTO users (id, username, email, password_hash, status, email_verified_at, created_at) " +
+                        "VALUES (0, {0}, {1}, {2}, {3}, {4}, {5})",
                         systemUser.Username,
                         systemUser.Email,
                         systemUser.PasswordHash,
                         (int)systemUser.Status,
-                        (int)systemUser.Role,
                         systemUser.EmailVerifiedAt,
                         systemUser.CreatedAt
                     );
@@ -89,7 +88,6 @@ public class InitializationService : IHostedService
             }
 
             // 将系统用户加入"初始用户"组
-            var initialGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.InitialGroupName);
             if (initialGroup != null)
             {
                 await permissionService.AddMemberAsync(initialGroup.Id, 0);
@@ -115,6 +113,19 @@ Keep these credentials extremely secure.
             consoleService.PrintInitSuccess("system", "system@internal.local", systemPassword);
         }
 
+        // ============ 确保 uid=0 始终在初始用户组 ============
+        if (initialGroup != null)
+        {
+            var isMember = await context.UserGroupMembers
+                .AnyAsync(m => m.GroupId == initialGroup.Id && m.UserId == 0);
+            if (!isMember)
+            {
+                await permissionService.AddMemberAsync(initialGroup.Id, 0);
+                _logger.LogWarning("System user (uid=0) was not in the initial group — auto-repaired");
+                consoleService.PrintWarning("System user (uid=0) was moved back into the initial user group");
+            }
+        }
+
         // ============ 创建超级管理员账户 ============
         if (!await userService.HasAdminAsync())
         {
@@ -124,7 +135,6 @@ Keep these credentials extremely secure.
                 Username = "admin",
                 Email = "admin@system.local",
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword, 12),
-                Role = UserRole.Admin,
                 Status = UserStatus.Normal,
                 EmailVerifiedAt = DateTime.UtcNow,
                 CreatedAt = DateTime.UtcNow
@@ -171,11 +181,10 @@ Please login and change the password immediately.
     {
         const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%";
         var result = new char[length];
-        var bytes = RandomNumberGenerator.GetBytes(length);
 
         for (int i = 0; i < length; i++)
         {
-            result[i] = chars[bytes[i] % chars.Length];
+            result[i] = chars[RandomNumberGenerator.GetInt32(chars.Length)];
         }
 
         return new string(result);
