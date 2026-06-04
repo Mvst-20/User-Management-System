@@ -75,15 +75,13 @@ public class TokenService : ITokenService
 
     public async Task DeleteExpiredTokensAsync()
     {
-        var expiredTokens = await _context.EmailVerificationTokens
+        var deletedCount = await _context.EmailVerificationTokens
             .Where(t => t.ExpiresAt < DateTime.UtcNow)
-            .ToListAsync();
+            .ExecuteDeleteAsync();
 
-        if (expiredTokens.Any())
+        if (deletedCount > 0)
         {
-            _context.EmailVerificationTokens.RemoveRange(expiredTokens);
-            await _context.SaveChangesAsync();
-            _logger.LogInformation("Deleted {Count} expired verification tokens", expiredTokens.Count);
+            _logger.LogInformation("Deleted {Count} expired verification tokens", deletedCount);
         }
     }
 }

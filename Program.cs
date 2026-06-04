@@ -28,6 +28,24 @@ builder.Configuration.GetSection("Jwt").Bind(appConfig.Jwt);
 builder.Configuration.GetSection("Smtp").Bind(appConfig.Smtp);
 builder.Configuration.GetSection("AppSettings").Bind(appConfig.AppSettings);
 
+// 启动配置验证
+if (string.IsNullOrWhiteSpace(appConfig.Jwt.Key) || appConfig.Jwt.Key.Length < 64)
+{
+    throw new InvalidOperationException("JWT Key 必须至少 64 个字符，请在 appsettings.json 中配置安全的密钥。");
+}
+if (string.IsNullOrWhiteSpace(appConfig.Smtp.Host))
+{
+    throw new InvalidOperationException("SMTP Host 不能为空，请在 appsettings.json 中配置 SMTP 服务器。");
+}
+if (string.IsNullOrWhiteSpace(appConfig.Smtp.Username) || string.IsNullOrWhiteSpace(appConfig.Smtp.Password))
+{
+    throw new InvalidOperationException("SMTP Username 和 Password 不能为空，请在 appsettings.json 中配置 SMTP 凭据。");
+}
+if (string.IsNullOrWhiteSpace(appConfig.Smtp.From))
+{
+    throw new InvalidOperationException("SMTP From 不能为空，请在 appsettings.json 中配置发件人邮箱。");
+}
+
 // ============ 数据库配置 ============
 
 var connectionString = builder.Configuration.GetConnectionString("Default");

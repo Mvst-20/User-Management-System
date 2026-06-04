@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
 
@@ -7,6 +8,13 @@ namespace UserManagementSystem.Extensions;
 
 public static class UserExtensions
 {
+    private static ILogger? _logger;
+
+    public static void ConfigureLogger(ILogger logger)
+    {
+        _logger = logger;
+    }
+
     public static UserResponse ToResponse(this User user)
     {
         JsonElement? extras = null;
@@ -17,7 +25,10 @@ public static class UserExtensions
                 using var doc = JsonDocument.Parse(user.Extras);
                 extras = doc.RootElement.Clone();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to parse extras JSON for user {UserId}", user.Id);
+            }
         }
 
         return new UserResponse(

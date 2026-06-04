@@ -28,6 +28,7 @@ public static class ResultCodes
     public const int LoginFail_AccountBanned = 204;  // 账号已被封禁
     public const int LoginFail_RateLimited = 205;    // 登录尝试过于频繁
     public const int AccountBanned = 206;            // 账号已被封禁
+    public const int LoginFail_AccountUnverified = 207; // 账号未验证
 
     // ============ 邮箱验证相关 (3xx) ============
     public const int EmailVerifySuccess = 300;       // 邮箱验证成功

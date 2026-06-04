@@ -42,7 +42,8 @@ public static class UserGroupEndpoints
         // 获取用户组详情
         app.MapGet("/api/user-groups/{id}", async (
             ulong id,
-            [FromServices] IPermissionService permissionService) =>
+            [FromServices] IPermissionService permissionService,
+            [FromServices] ILogger<Program> logger) =>
         {
             var group = await permissionService.GetGroupByIdAsync(id);
             if (group == null)
@@ -61,7 +62,10 @@ public static class UserGroupEndpoints
                     using var doc = JsonDocument.Parse(group.Extras);
                     extras = doc.RootElement.Clone();
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse extras JSON for group {GroupId}", id);
+                }
             }
 
             var response = new UserGroupDetailResponse(
@@ -281,7 +285,8 @@ public static class UserGroupEndpoints
         // 获取用户组自定义字段
         app.MapGet("/api/user-groups/{id}/extras", async (
             ulong id,
-            [FromServices] IPermissionService permissionService) =>
+            [FromServices] IPermissionService permissionService,
+            [FromServices] ILogger<Program> logger) =>
         {
             var group = await permissionService.GetGroupByIdAsync(id);
             if (group == null)
@@ -297,7 +302,10 @@ public static class UserGroupEndpoints
                     using var doc = JsonDocument.Parse(group.Extras);
                     extras = doc.RootElement.Clone();
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse extras JSON for group {GroupId}", id);
+                }
             }
 
             return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功",
@@ -310,7 +318,8 @@ public static class UserGroupEndpoints
         app.MapPut("/api/user-groups/{id}/extras", async (
             ulong id,
             [FromBody] UpdateUserGroupExtrasRequest request,
-            [FromServices] IPermissionService permissionService) =>
+            [FromServices] IPermissionService permissionService,
+            [FromServices] ILogger<Program> logger) =>
         {
             var group = await permissionService.GetGroupByIdAsync(id);
             if (group == null)
@@ -338,7 +347,10 @@ public static class UserGroupEndpoints
                     using var doc = JsonDocument.Parse(updated.Extras);
                     result = doc.RootElement.Clone();
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse extras JSON for group {GroupId}", id);
+                }
             }
 
             return Results.Ok(new ApiResponse(ResultCodes.UserGroupExtrasUpdateSuccess, "更新成功",

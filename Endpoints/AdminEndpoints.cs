@@ -107,7 +107,8 @@ public static class AdminEndpoints
         // 发送测试邮件
         app.MapPost("/api/admin/email/test", async (
             [FromBody] SendEmailRequest request,
-            [FromServices] IEmailService emailService) =>
+            [FromServices] IEmailService emailService,
+            [FromServices] ILogger<Program> logger) =>
         {
             if (string.IsNullOrWhiteSpace(request.To))
             {
@@ -131,7 +132,8 @@ public static class AdminEndpoints
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.EmailSendFail, $"邮件发送失败: {ex.Message}"));
+                logger.LogError(ex, "Failed to send test email to {To}", request.To);
+                return Results.BadRequest(new ApiResponse(ResultCodes.EmailSendFail, "邮件发送失败，请检查 SMTP 配置"));
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.AdminServer);
     }

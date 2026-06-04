@@ -49,8 +49,8 @@ public class PermissionService : IPermissionService
     {
         var cacheKey = $"user_permissions_{userId}";
 
-        if (_cache.TryGetValue(cacheKey, out List<string>? cachedPermissions))
-            return cachedPermissions!;
+        if (_cache.TryGetValue(cacheKey, out List<string>? cachedPermissions) && cachedPermissions != null)
+            return cachedPermissions;
 
         var groupIds = await _context.UserGroupMembers
             .Where(m => m.UserId == userId)
@@ -62,7 +62,6 @@ public class PermissionService : IPermissionService
 
         var permissionCodes = await _context.UserGroupPermissions
             .Where(gp => groupIds.Contains(gp.GroupId))
-            .Include(gp => gp.Permission)
             .Select(gp => gp.Permission.Code)
             .Distinct()
             .ToListAsync();

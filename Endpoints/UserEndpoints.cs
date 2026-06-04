@@ -11,6 +11,19 @@ namespace UserManagementSystem.Endpoints;
 
 public static class UserEndpoints
 {
+    /// <summary>
+    /// 验证用户状态：检查用户是否存在、是否被软删除、是否被封禁
+    /// </summary>
+    /// <returns>如果用户状态异常则返回对应的 IResult，否则返回 null 表示用户状态正常</returns>
+    private static IResult? ValidateUserStatus(User? user)
+    {
+        if (user == null || user.Status == UserStatus.Deleted)
+            return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
+        if (user.Status == UserStatus.Banned)
+            return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
+        return null;
+    }
+
     public static void MapUserEndpoints(this WebApplication app)
     {
         // ============ 公开端点（不需要权限检查）============
@@ -149,7 +162,7 @@ public static class UserEndpoints
 
             if (user.Status == UserStatus.Unverified)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountBanned, "账号未验证，请先验证邮箱"));
+                return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountUnverified, "账号未验证，请先验证邮箱"));
             }
 
             // 更新最后登录信息
@@ -277,16 +290,8 @@ public static class UserEndpoints
             HttpContext httpContext) =>
         {
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             // 检查用户名唯一性（排除已软删除用户）
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
@@ -349,16 +354,8 @@ public static class UserEndpoints
             [FromServices] IUserService userService) =>
         {
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
             {
@@ -448,16 +445,8 @@ public static class UserEndpoints
             }
 
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash))
             {
@@ -502,16 +491,8 @@ public static class UserEndpoints
             }
 
             var user = await userService.GetByIdAsync(id);
-
-            if (user == null || user.Status == UserStatus.Deleted)
-            {
-                return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
-            }
-
-            if (user.Status == UserStatus.Banned)
-            {
-                return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
-            }
+            var statusResult = ValidateUserStatus(user);
+            if (statusResult != null) return statusResult;
 
             if (request.NewEmail == user.Email)
             {
