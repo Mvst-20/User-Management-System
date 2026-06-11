@@ -409,7 +409,9 @@ public class PermissionService : IPermissionService
             PermissionCodes.AdminStats, PermissionCodes.AdminServer,
             PermissionCodes.PermissionRead, PermissionCodes.PermissionCreate, PermissionCodes.PermissionUpdate, PermissionCodes.PermissionDelete,
             PermissionCodes.UserGroupRead, PermissionCodes.UserGroupCreate, PermissionCodes.UserGroupUpdate, PermissionCodes.UserGroupDelete,
-            PermissionCodes.UserGroupManageMembers, PermissionCodes.UserGroupManagePermissions
+            PermissionCodes.UserGroupManageMembers, PermissionCodes.UserGroupManagePermissions,
+            PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage,
+            PermissionCodes.SystemSettingRead, PermissionCodes.SystemSettingUpdate
         };
 
         var existingCodes = (await _context.Permissions.Select(p => p.Code).ToListAsync()).ToHashSet();
@@ -467,6 +469,11 @@ public class PermissionService : IPermissionService
         PermissionCodes.UserGroupDelete => ("删除用户组", "user-group", "删除用户组"),
         PermissionCodes.UserGroupManageMembers => ("管理用户组成员", "user-group", "添加或移除用户组成员"),
         PermissionCodes.UserGroupManagePermissions => ("管理用户组权限", "user-group", "设置用户组权限"),
+        PermissionCodes.FollowUser => ("关注用户", "follow", "关注和取消关注其他用户"),
+        PermissionCodes.FollowRead => ("查看关注", "follow", "查看关注列表和粉丝列表"),
+        PermissionCodes.FollowManage => ("管理关注设置", "follow", "管理关注列表隐私设置"),
+        PermissionCodes.SystemSettingRead => ("查看系统设置", "system-setting", "查看系统设置信息"),
+        PermissionCodes.SystemSettingUpdate => ("更新系统设置", "system-setting", "更新系统设置信息"),
         _ => (code, "custom", "")
     };
 
@@ -540,7 +547,9 @@ public class PermissionService : IPermissionService
                 PermissionCodes.UserRead, PermissionCodes.UserUpdate, PermissionCodes.UserDelete, PermissionCodes.UserList,
                 PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail,
                 PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
-                PermissionCodes.AdminStats, PermissionCodes.UserGroupRead, PermissionCodes.UserLogout
+                PermissionCodes.AdminStats, PermissionCodes.UserGroupRead, PermissionCodes.UserLogout,
+                PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage,
+                PermissionCodes.SystemSettingRead, PermissionCodes.SystemSettingUpdate
             };
             foreach (var code in adminPermCodes.Where(c => permByCode.ContainsKey(c)))
             {
@@ -555,7 +564,8 @@ public class PermissionService : IPermissionService
             {
                 PermissionCodes.UserRead, PermissionCodes.UserUpdate,
                 PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail,
-                PermissionCodes.UserLogout, PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete
+                PermissionCodes.UserLogout, PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
+                PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage
             };
             foreach (var code in normalPermCodes.Where(c => permByCode.ContainsKey(c)))
             {

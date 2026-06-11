@@ -16,6 +16,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<UserGroup> UserGroups { get; set; }
     public DbSet<UserGroupMember> UserGroupMembers { get; set; }
     public DbSet<UserGroupPermission> UserGroupPermissions { get; set; }
+    public DbSet<UserFollow> UserFollows { get; set; }
+    public DbSet<SystemSetting> SystemSettings { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -36,6 +38,8 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.CreatedAt)
                 .HasColumnType("datetime")
                 .ValueGeneratedOnAdd();
+            entity.Property(e => e.IsFollowingListHidden)
+                .HasDefaultValue(false);
         });
 
         // EmailVerificationToken entity configuration
@@ -117,6 +121,36 @@ public class ApplicationDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(e => e.PermissionId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // UserFollow entity configuration
+        modelBuilder.Entity<UserFollow>(entity =>
+        {
+            entity.HasIndex(e => new { e.FollowerId, e.FollowingId }).IsUnique();
+            entity.HasIndex(e => e.FollowerId);
+            entity.HasIndex(e => e.FollowingId);
+            entity.HasIndex(e => e.CreatedAt);
+            entity.Property(e => e.CreatedAt)
+                .HasColumnType("datetime")
+                .ValueGeneratedOnAdd();
+
+            entity.HasOne(e => e.Follower)
+                .WithMany(u => u.Following)
+                .HasForeignKey(e => e.FollowerId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Following)
+                .WithMany(u => u.Followers)
+                .HasForeignKey(e => e.FollowingId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // SystemSetting entity configuration
+        modelBuilder.Entity<SystemSetting>(entity =>
+        {
+            entity.HasIndex(e => e.Key).IsUnique();
+            entity.Property(e => e.UpdatedAt)
+                .HasColumnType("datetime");
         });
     }
 }
