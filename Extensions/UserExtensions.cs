@@ -44,9 +44,30 @@ public static class UserExtensions
         return claim != null && ulong.TryParse(claim.Value, out var id) ? id : null;
     }
 
+    /// <summary>
+    /// 获取当前用户 ID，若未认证则抛出异常
+    /// </summary>
+    public static ulong GetRequiredUserId(this ClaimsPrincipal principal)
+    {
+        var claim = principal.FindFirst(ClaimTypes.NameIdentifier);
+        if (claim == null || !ulong.TryParse(claim.Value, out var id))
+            throw new UnauthorizedAccessException("无法获取当前用户信息");
+        return id;
+    }
+
     public static bool IsOwnResource(this ClaimsPrincipal principal, ulong resourceUserId)
     {
         var currentUserId = principal.GetUserId();
         return currentUserId.HasValue && currentUserId.Value == resourceUserId;
+    }
+
+    /// <summary>
+    /// 标准化分页参数
+    /// </summary>
+    public static (int page, int pageSize) NormalizePagination(int page, int pageSize, int maxPageSize = 100)
+    {
+        page = page <= 0 ? 1 : page;
+        pageSize = pageSize <= 0 || pageSize > maxPageSize ? 20 : pageSize;
+        return (page, pageSize);
     }
 }

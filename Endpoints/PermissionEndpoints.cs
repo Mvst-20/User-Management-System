@@ -85,7 +85,7 @@ public static class PermissionEndpoints
 
             if (await permissionService.GetPermissionByCodeAsync(request.Code) != null)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.PermissionCodeExists, "权限代码已存在"));
+                return Results.Conflict(new ApiResponse(ResultCodes.PermissionCodeExists, "权限代码已存在"));
             }
 
             var currentUserId = httpContext.User.GetUserId();
@@ -103,9 +103,11 @@ public static class PermissionEndpoints
             };
 
             var created = await permissionService.CreatePermissionAsync(permission);
+            var response = new PermissionResponse(created.Id, created.Code, created.Name, created.Category,
+                created.IsSpecial, created.IsSystem, created.Description, created.CreatorId, created.CreatedAt);
 
-            return Results.Ok(new ApiResponse(ResultCodes.PermissionCreateSuccess, "创建成功",
-                new PermissionResponse(created.Id, created.Code, created.Name, created.Category, created.IsSpecial, created.IsSystem, created.Description, created.CreatorId, created.CreatedAt)));
+            return Results.Created($"/api/permissions/{created.Id}",
+                new ApiResponse(ResultCodes.PermissionCreateSuccess, "创建成功", response));
         })
         .RequireAuthorization()
         .RequirePermission(PermissionCodes.PermissionCreate);

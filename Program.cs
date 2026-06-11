@@ -225,12 +225,31 @@ using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-    if (app.Environment.IsDevelopment() || !await context.Database.CanConnectAsync())
+    // CanConnectAsync 只检查能否连上数据库，不检查表是否存在
+    var canConnect = await context.Database.CanConnectAsync();
+
+    // 检查 users 表是否存在（判段数据库是否已初始化）
+    bool tablesExist = false;
+    if (canConnect)
     {
-        // 开发环境或首次运行：确保数据库已创建
+        try
+        {
+            await context.Database.ExecuteSqlRawAsync("SELECT 1 FROM users LIMIT 1");
+            tablesExist = true;
+        }
+        catch
+        {
+            tablesExist = false;
+        }
+    }
+
+    // 数据库连接失败 或 表不存在 → 自动建表
+    if (!canConnect || !tablesExist)
+    {
+        consoleService.PrintInfo("Database", "Creating tables...");
         await context.Database.EnsureCreatedAsync();
     }
-    // 生产环境使用 Migrations：运行 dotnet ef database update
+    // 已有表的数据库使用 Migrations：运行 dotnet ef database update
 }
 
 // ============ 中间件配置 ============

@@ -8,16 +8,6 @@ namespace UserManagementSystem.Endpoints;
 
 public static class FollowEndpoints
 {
-    private static ulong GetCurrentUserId(ClaimsPrincipal user)
-    {
-        var userIdClaim = user.FindFirst(ClaimTypes.NameIdentifier);
-        if (userIdClaim == null || !ulong.TryParse(userIdClaim.Value, out var userId))
-        {
-            throw new UnauthorizedAccessException("无法获取当前用户信息");
-        }
-        return userId;
-    }
-
     public static void MapFollowEndpoints(this WebApplication app)
     {
         // ============ 关注相关端点 ============
@@ -31,22 +21,22 @@ public static class FollowEndpoints
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                var result = await followService.FollowAsync(currentUserId, userId);
+                var uid = currentUser.GetRequiredUserId();
+                var result = await followService.FollowAsync(uid, userId);
                 return Results.Ok(new ApiResponse(0, "关注成功", result));
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new ApiResponse(400, ex.Message));
+                return Results.BadRequest(new ApiResponse(ResultCodes.Error, ex.Message));
             }
             catch (KeyNotFoundException)
             {
-                return Results.NotFound(new ApiResponse(404, "用户不存在"));
+                return Results.NotFound(new ApiResponse(ResultCodes.NotFound, "用户不存在"));
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to follow user {UserId}", userId);
-                return Results.StatusCode(500);
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowUser);
 
@@ -59,18 +49,16 @@ public static class FollowEndpoints
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                var result = await followService.UnfollowAsync(currentUserId, userId);
-                if (!result)
-                {
-                    return Results.BadRequest(new ApiResponse(400, "未关注该用户"));
-                }
-                return Results.Ok(new ApiResponse(0, "取消关注成功"));
+                var uid = currentUser.GetRequiredUserId();
+                var result = await followService.UnfollowAsync(uid, userId);
+                return result
+                    ? Results.Ok(new ApiResponse(0, "取消关注成功"))
+                    : Results.BadRequest(new ApiResponse(ResultCodes.Error, "未关注该用户"));
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to unfollow user {UserId}", userId);
-                return Results.StatusCode(500);
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowUser);
 
@@ -78,17 +66,19 @@ public static class FollowEndpoints
         app.MapGet("/api/users/{userId}/follow/status", async (
             ulong userId,
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                var isFollowing = await followService.IsFollowingAsync(currentUserId, userId);
+                var uid = currentUser.GetRequiredUserId();
+                var isFollowing = await followService.IsFollowingAsync(uid, userId);
                 return Results.Ok(new ApiResponse(0, "获取成功", new { IsFollowing = isFollowing }));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to check follow status for user {UserId}", userId);
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowRead);
 
@@ -97,20 +87,20 @@ public static class FollowEndpoints
             [FromQuery] int page,
             [FromQuery] int pageSize,
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                page = page <= 0 ? 1 : page;
-                pageSize = pageSize <= 0 || pageSize > 100 ? 20 : pageSize;
-
-                var result = await followService.GetFollowingListAsync(currentUserId, page, pageSize, currentUserId);
+                var uid = currentUser.GetRequiredUserId();
+                (page, pageSize) = UserExtensions.NormalizePagination(page, pageSize);
+                var result = await followService.GetFollowingListAsync(uid, page, pageSize, uid);
                 return Results.Ok(new ApiResponse(0, "获取成功", result));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to get following list");
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowRead);
 
@@ -119,20 +109,20 @@ public static class FollowEndpoints
             [FromQuery] int page,
             [FromQuery] int pageSize,
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                page = page <= 0 ? 1 : page;
-                pageSize = pageSize <= 0 || pageSize > 100 ? 20 : pageSize;
-
-                var result = await followService.GetFollowersListAsync(currentUserId, page, pageSize, currentUserId);
+                var uid = currentUser.GetRequiredUserId();
+                (page, pageSize) = UserExtensions.NormalizePagination(page, pageSize);
+                var result = await followService.GetFollowersListAsync(uid, page, pageSize, uid);
                 return Results.Ok(new ApiResponse(0, "获取成功", result));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to get followers list");
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowRead);
 
@@ -142,20 +132,20 @@ public static class FollowEndpoints
             [FromQuery] int page,
             [FromQuery] int pageSize,
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                page = page <= 0 ? 1 : page;
-                pageSize = pageSize <= 0 || pageSize > 100 ? 20 : pageSize;
-
-                var result = await followService.GetFollowingListAsync(userId, page, pageSize, currentUserId);
+                var uid = currentUser.GetRequiredUserId();
+                (page, pageSize) = UserExtensions.NormalizePagination(page, pageSize);
+                var result = await followService.GetFollowingListAsync(userId, page, pageSize, uid);
                 return Results.Ok(new ApiResponse(0, "获取成功", result));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to get following list for user {UserId}", userId);
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowRead);
 
@@ -165,53 +155,57 @@ public static class FollowEndpoints
             [FromQuery] int page,
             [FromQuery] int pageSize,
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                page = page <= 0 ? 1 : page;
-                pageSize = pageSize <= 0 || pageSize > 100 ? 20 : pageSize;
-
-                var result = await followService.GetFollowersListAsync(userId, page, pageSize, currentUserId);
+                var uid = currentUser.GetRequiredUserId();
+                (page, pageSize) = UserExtensions.NormalizePagination(page, pageSize);
+                var result = await followService.GetFollowersListAsync(userId, page, pageSize, uid);
                 return Results.Ok(new ApiResponse(0, "获取成功", result));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to get followers list for user {UserId}", userId);
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowRead);
 
         // 获取关注统计
         app.MapGet("/api/users/{userId}/follow/stats", async (
             ulong userId,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
                 var result = await followService.GetFollowStatsAsync(userId);
                 return Results.Ok(new ApiResponse(0, "获取成功", result));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to get follow stats for user {UserId}", userId);
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowRead);
 
         // 获取我的关注统计
         app.MapGet("/api/users/me/follow/stats", async (
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                var result = await followService.GetFollowStatsAsync(currentUserId);
+                var uid = currentUser.GetRequiredUserId();
+                var result = await followService.GetFollowStatsAsync(uid);
                 return Results.Ok(new ApiResponse(0, "获取成功", result));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to get own follow stats");
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowRead);
 
@@ -219,34 +213,38 @@ public static class FollowEndpoints
         app.MapPut("/api/users/me/following/visibility", async (
             [FromBody] VisibilityRequest request,
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                await followService.SetFollowingListVisibilityAsync(currentUserId, request.IsHidden);
+                var uid = currentUser.GetRequiredUserId();
+                await followService.SetFollowingListVisibilityAsync(uid, request.IsHidden);
                 return Results.Ok(new ApiResponse(0, "设置成功"));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to set following list visibility");
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowManage);
 
         // 获取关注列表可见性设置
         app.MapGet("/api/users/me/following/visibility", async (
             ClaimsPrincipal currentUser,
-            [FromServices] IFollowService followService) =>
+            [FromServices] IFollowService followService,
+            [FromServices] ILogger<Program> logger) =>
         {
             try
             {
-                var currentUserId = GetCurrentUserId(currentUser);
-                var isHidden = await followService.GetFollowingListVisibilityAsync(currentUserId);
+                var uid = currentUser.GetRequiredUserId();
+                var isHidden = await followService.GetFollowingListVisibilityAsync(uid);
                 return Results.Ok(new ApiResponse(0, "获取成功", new { IsHidden = isHidden }));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                logger.LogError(ex, "Failed to get following list visibility");
+                return Results.Json(new ApiResponse(ResultCodes.InternalServerError, "服务器内部错误"), statusCode: 500);
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.FollowManage);
     }
