@@ -81,6 +81,8 @@ builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
 builder.Services.AddSingleton<IConsoleService, ConsoleService>();
 builder.Services.AddScoped<IPermissionService, PermissionService>();
 builder.Services.AddSingleton<ISystemMonitorService, SystemMonitorService>();
+builder.Services.AddScoped<IFollowService, FollowService>();
+builder.Services.AddScoped<ISystemSettingService, SystemSettingService>();
 
 // 后台服务
 builder.Services.AddHostedService<InitializationService>();
@@ -259,6 +261,8 @@ app.MapAvatarEndpoints();
 app.MapAdminEndpoints();
 app.MapPermissionEndpoints();
 app.MapUserGroupEndpoints();
+app.MapFollowEndpoints();
+app.MapSystemSettingEndpoints();
 
 // 健康检查端点
 app.MapGet("/health", () => Results.Ok(new ApiResponse(ResultCodes.Success, "healthy", new { status = "healthy", timestamp = DateTime.UtcNow })));

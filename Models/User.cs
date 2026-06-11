@@ -79,5 +79,15 @@ public class User
     [Column("refresh_token_expires_at")]
     public DateTime? RefreshTokenExpiresAt { get; set; }
 
+    /// <summary>
+    /// 是否隐藏关注列表（true=仅自己可见）
+    /// </summary>
+    [Column("is_following_list_hidden")]
+    public bool IsFollowingListHidden { get; set; } = false;
+
     public virtual ICollection<EmailVerificationToken> VerificationTokens { get; set; } = new List<EmailVerificationToken>();
+
+    // 关注关系导航属性
+    public virtual ICollection<UserFollow> Following { get; set; } = new List<UserFollow>();
+    public virtual ICollection<UserFollow> Followers { get; set; } = new List<UserFollow>();
 }

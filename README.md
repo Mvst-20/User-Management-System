@@ -4,13 +4,16 @@
 
 ## 功能特性
 
-- **用户认证**：JWT Bearer Token 认证，支持 Token 过期配置
+- **用户认证**：JWT Bearer Token 认证，支持 Refresh Token 免密刷新
 - **密码安全**：BCrypt 哈希存储（Work Factor 12），防止暴力破解
 - **邮箱验证**：完整的注册验证和邮箱修改流程，支持频率限制
 - **头像管理**：支持上传、下载、删除用户头像（路径遍历防护 + 图片压缩 + 缩略图）
 - **在线状态**：基于内存的在线用户跟踪，自动过期清理
 - **权限体系**：基于用户组的细粒度权限控制，支持 A/B/C 特殊权限
 - **用户组管理**：支持创建、编辑、删除用户组及分配权限和成员
+- **用户关注**：支持关注/取消关注、关注列表、粉丝列表、隐私设置
+- **系统管理**：站点名称/LOGO 设置、友链管理、登录/注册开关
+- **系统监控**：实时系统 CPU/内存/网络/运行时间监控
 - **后台服务**：自动清理过期 Token 和过期在线状态
 - **自动初始化**：首次启动自动创建系统用户、管理员账户、权限和用户组
 - **输入验证**：所有请求 DTO 使用 Data Annotations 验证
@@ -174,9 +177,9 @@ dotnet run --environment Production
 | 用户组 | 说明 | 成员锁定 | 可删除 | 持有权限 |
 |--------|------|----------|--------|---------|
 | 初始用户 | 仅 uid=0 成员，持有 A 权限 | 是（不可添加/移除成员） | 否 | PERM_A |
-| 超级管理员 | 除 A 外的所有权限 | 否 | 否 | PERM_B, PERM_C + 全部 API 权限 |
-| 管理员 | 用户管理和基本管理权限 | 否 | 是 | 用户管理 + 统计 + 头像 + 用户组查看 + 登出 |
-| 普通用户 | 基本用户权限 | 否 | 是 | 查看用户 + 更新自己 + 修改密码/邮箱 + 头像 + 登出 |
+| 超级管理员 | 除 A 外的所有权限 | 否 | 否 | PERM_B, PERM_C + 全部 API 权限（含关注和系统设置） |
+| 管理员 | 用户管理和基本管理权限 | 否 | 是 | 用户管理 + 统计 + 头像 + 用户组查看 + 登出 + 关注 + 系统设置 |
+| 普通用户 | 基本用户权限 | 否 | 是 | 查看/更新自己 + 修改密码/邮箱 + 头像 + 登出 + 关注 |
 
 > **初始用户组**：不可编辑（名称、描述、权限均不可修改）、不可删除、不可添加或移除成员。
 >
@@ -210,6 +213,11 @@ dotnet run --environment Production
 | user-group | `user-group:delete` | 删除用户组 | 删除用户组（B 权限覆盖） |
 | user-group | `user-group:manage-members` | 管理成员 | 添加/移除用户组成员（B 权限覆盖） |
 | user-group | `user-group:manage-permissions` | 管理权限 | 设置用户组权限（B 权限覆盖） |
+| follow | `follow:user` | 关注用户 | 关注和取消关注其他用户 |
+| follow | `follow:read` | 查看关注 | 查看关注列表、粉丝列表和关注统计 |
+| follow | `follow:manage` | 管理关注设置 | 管理关注列表隐私设置 |
+| system-setting | `system-setting:read` | 查看系统设置 | 查看系统设置信息 |
+| system-setting | `system-setting:update` | 更新系统设置 | 更新站点名称、LOGO、友链、登录/注册开关 |
 
 ### 权限检查逻辑
 
@@ -237,6 +245,9 @@ dotnet run --environment Production
 | GET | `/api/users/verify-email-change` | 确认修改邮箱 | Query: `?token=xxx` |
 | GET | `/api/avatars/{filename}` | 获取头像（支持 `?type=thumb` 获取缩略图） | - |
 | GET | `/api/permissions/custom` | 获取自定义权限列表 | - |
+| GET | `/api/system/info` | 获取系统基本信息（站点名/LOGO/登录注册开关） | - |
+| GET | `/api/system/friend-links` | 获取友情链接 | - |
+| GET | `/api/users/{id}/follow/stats` | 获取用户关注统计（需登录） | - |
 | GET | `/health` | 健康检查 | - |
 
 **请求验证规则**：
@@ -272,6 +283,26 @@ dotnet run --environment Production
 > **手机号**：仅在 PUT/PATCH 更新时支持，最大 20 字符。注册时暂不支持。
 
 > **头像上传**：仅支持 JPG/PNG/GIF/WebP 格式，最大 6MB。文件大于 512KB 时自动压缩并生成缩略图（256px），小于等于 512KB 时不压缩（缩略图 = 原图）。获取头像时可通过 `?type=thumb` 参数获取缩略图。
+
+### 关注端点（需要认证 + 权限）
+
+| 方法 | 路由 | 描述 | 所需权限 |
+|------|------|------|---------|
+| POST | `/api/users/{userId}/follow` | 关注用户 | `follow:user` |
+| DELETE | `/api/users/{userId}/follow` | 取消关注 | `follow:user` |
+| GET | `/api/users/{userId}/follow/status` | 检查是否已关注 | `follow:read` |
+| GET | `/api/users/me/following` | 获取我的关注列表 | `follow:read` |
+| GET | `/api/users/me/followers` | 获取我的粉丝列表 | `follow:read` |
+| GET | `/api/users/me/follow/stats` | 获取我的关注统计 | `follow:read` |
+| GET | `/api/users/{userId}/following` | 获取指定用户关注列表（受隐私设置影响） | `follow:read` |
+| GET | `/api/users/{userId}/followers` | 获取指定用户粉丝列表 | `follow:read` |
+| GET | `/api/users/{userId}/follow/stats` | 获取指定用户关注统计 | `follow:read` |
+| PUT | `/api/users/me/following/visibility` | 设置关注列表可见性 | `follow:manage` |
+| GET | `/api/users/me/following/visibility` | 获取关注列表可见性设置 | `follow:manage` |
+
+> **隐私设置**：用户可设置关注列表仅自己可见（`PUT /api/users/me/following/visibility`）。隐藏后，他人查看该用户关注列表时返回空列表。
+>
+> **分页参数**：列表接口支持 `page`（默认 1）和 `pageSize`（默认 20，最大 100）Query 参数。
 
 ### 管理员端点（需要认证 + 权限）
 
@@ -320,6 +351,29 @@ dotnet run --environment Production
 > **超级管理员组**（`is_protected=true`）不可删除，但可修改成员和权限。
 >
 > **A 权限不可分配**给除"初始用户"外的任何用户组。
+
+### 系统管理端点
+
+#### 公开接口（无需认证）
+
+| 方法 | 路由 | 描述 |
+|------|------|------|
+| GET | `/api/system/info` | 获取系统基本信息（站点名、LOGO URL、登录/注册开关） |
+| GET | `/api/system/friend-links` | 获取友情链接列表 |
+
+#### 管理接口（需要认证 + `system-setting` 权限）
+
+| 方法 | 路由 | 描述 | 所需权限 |
+|------|------|------|---------|
+| PUT | `/api/admin/system/info` | 更新系统基本信息 | `system-setting:update` |
+| PUT | `/api/admin/system/friend-links` | 更新友情链接 | `system-setting:update` |
+| GET | `/api/admin/system/settings` | 获取所有系统设置 | `system-setting:read` |
+| GET | `/api/admin/system/settings/{key}` | 获取单个设置 | `system-setting:read` |
+| PUT | `/api/admin/system/settings/{key}` | 更新单个设置 | `system-setting:update` |
+
+> **系统信息**：`site_name`（站点名称）、`logo_url`（LOGO URL）、`allow_login`（是否允许登录，true/false）、`allow_register`（是否允许注册，true/false）。默认为允许。
+>
+> **友情链接**：JSON 数组格式存储，每项包含 `name`、`url`、`description`（可选）、`logoUrl`（可选）。
 
 ## API 响应格式
 
@@ -379,12 +433,14 @@ dotnet run --environment Production
 
 | 表名 | 说明 |
 |------|------|
-| `users` | 用户表（含自定义 JSON 扩展字段 `extras`） |
+| `users` | 用户表（含自定义 JSON 扩展字段 `extras`、Refresh Token、关注列表隐私设置） |
 | `email_verification_tokens` | 邮箱验证令牌表 |
 | `permissions` | 权限表（含特殊权限 A/B/C 和各 API 权限，`creator_id` 记录创建人） |
 | `user_groups` | 用户组表（含自定义 JSON 扩展字段 `extras`，`is_member_locked` 标记成员锁定） |
 | `user_group_members` | 用户组成员关联表 |
 | `user_group_permissions` | 用户组权限关联表 |
+| `user_follows` | 用户关注关系表（follower_id + following_id 唯一约束） |
+| `system_settings` | 系统设置表（键值对结构，支持 string/bool/json 类型） |
 
 ## 项目结构
 
@@ -392,23 +448,44 @@ dotnet run --environment Production
 UCS/
 ├── Configuration/       # 配置类 (AppConfiguration, JwtConfig, SmtpConfig, AppSettings)
 ├── Data/               # 数据库上下文 (ApplicationDbContext)
-├── DTOs/               # 数据传输对象 (ApiResponse, ResultCodes, PermissionCodes, UserDTOs, PermissionDTOs)
+├── DTOs/               # 数据传输对象
+│   ├── ApiResponse.cs              # API 统一响应格式
+│   ├── ResultCodes.cs              # 响应状态码常量
+│   ├── PermissionCodes.cs          # 权限代码常量
+│   ├── PermissionDTOs.cs           # 权限和用户组 DTO
+│   ├── UserDTOs.cs                 # 用户相关 DTO
+│   ├── FollowDTOs.cs               # 关注相关 DTO
+│   └── SystemSettingDTOs.cs        # 系统设置相关 DTO
 ├── Endpoints/          # API 端点定义
-│   ├── UserEndpoints.cs           # 用户端点
-│   ├── AdminEndpoints.cs          # 管理员端点
-│   ├── AvatarEndpoints.cs         # 头像端点
+│   ├── UserEndpoints.cs           # 用户端点（注册/登录/信息/密码/邮箱）
+│   ├── AdminEndpoints.cs          # 管理员端点（统计/服务器状态）
+│   ├── AvatarEndpoints.cs         # 头像端点（上传/下载/删除）
 │   ├── PermissionEndpoints.cs     # 权限管理端点
-│   └── UserGroupEndpoints.cs      # 用户组管理端点
+│   ├── UserGroupEndpoints.cs      # 用户组管理端点
+│   ├── FollowEndpoints.cs         # 关注管理端点
+│   └── SystemSettingEndpoints.cs  # 系统设置端点
 ├── Extensions/         # 扩展方法 (UserExtensions, PermissionEndpointExtensions)
 ├── Middleware/         # 中间件 (ExceptionHandlingMiddleware)
-├── Models/             # 实体模型 (User, EmailVerificationToken, Permission, UserGroup, 枚举)
+├── Models/             # 实体模型
+│   ├── User.cs                     # 用户模型
+│   ├── EmailVerificationToken.cs   # 邮箱验证令牌
+│   ├── Permission.cs               # 权限
+│   ├── UserGroup.cs                # 用户组
+│   ├── UserGroupMember.cs          # 用户组成员
+│   ├── UserGroupPermission.cs      # 用户组权限
+│   ├── UserFollow.cs               # 用户关注关系
+│   └── SystemSetting.cs            # 系统设置
 ├── Services/           # 业务服务
 │   ├── ConsoleService.cs          # 控制台输出
 │   ├── EmailService.cs            # 邮件发送
+│   ├── FollowService.cs           # 关注管理
 │   ├── InitializationService.cs   # 启动初始化（含权限和用户组种子数据）
 │   ├── JwtService.cs              # JWT Token 生成
 │   ├── OnlineUserService.cs       # 在线用户跟踪（单例）
-│   ├── PermissionService.cs       # 权限检查和管理
+│   ├── PermissionService.cs       # 权限检查和管理（含种子数据）
+│   ├── RefreshTokenService.cs     # Refresh Token 管理
+│   ├── SystemMonitorService.cs    # 系统资源监控
+│   ├── SystemSettingService.cs    # 系统设置管理（含缓存）
 │   ├── TokenBlacklistService.cs   # JWT Token 黑名单（登出撤销）
 │   ├── TokenCleanupService.cs     # 后台清理服务（每小时）
 │   ├── TokenService.cs            # 验证 Token 管理

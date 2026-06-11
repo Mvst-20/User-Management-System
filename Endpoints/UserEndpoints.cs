@@ -61,9 +61,16 @@ public static class UserEndpoints
             [FromServices] ITokenService tokenService,
             [FromServices] IEmailService emailService,
             [FromServices] IPermissionService permissionService,
+            [FromServices] ISystemSettingService systemSettingService,
             [FromServices] IMemoryCache cache,
             [FromServices] ILogger<Program> logger) =>
         {
+            // 检查是否允许注册
+            if (!await systemSettingService.GetBoolSettingAsync("allow_register", true))
+            {
+                return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放注册"), statusCode: 403);
+            }
+
             // 注册速率限制（同一邮箱每分钟最多5次）
             var rateLimitKey = $"register_rate_{request.Email}";
             if (IsRateLimited(cache, rateLimitKey, 5, TimeSpan.FromMinutes(1)))
@@ -133,10 +140,17 @@ public static class UserEndpoints
             [FromServices] IJwtService jwtService,
             [FromServices] IRefreshTokenService refreshTokenService,
             [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] ISystemSettingService systemSettingService,
             [FromServices] IMemoryCache cache,
             [FromServices] AppConfiguration appConfig,
             HttpContext context) =>
         {
+            // 检查是否允许登录
+            if (!await systemSettingService.GetBoolSettingAsync("allow_login", true))
+            {
+                return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放登录"), statusCode: 403);
+            }
+
             // 登录暴力破解防护：基于 IP + 登录标识限流
             var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             var loginKey = request.Login ?? string.Empty;
@@ -197,11 +211,18 @@ public static class UserEndpoints
             [FromBody] RefreshTokenRequest request,
             [FromServices] IRefreshTokenService refreshTokenService,
             [FromServices] IJwtService jwtService,
+            [FromServices] ISystemSettingService systemSettingService,
             [FromServices] AppConfiguration appConfig) =>
         {
             if (string.IsNullOrWhiteSpace(request.RefreshToken))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "Refresh Token 不能为空"));
+            }
+
+            // 检查是否允许登录
+            if (!await systemSettingService.GetBoolSettingAsync("allow_login", true))
+            {
+                return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放登录"), statusCode: 403);
             }
 
             var user = await refreshTokenService.ValidateAsync(request.RefreshToken);

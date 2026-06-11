@@ -41,6 +41,15 @@ public static class PermissionCodes
     public const string UserGroupManageMembers = "user-group:manage-members";
     public const string UserGroupManagePermissions = "user-group:manage-permissions";
 
+    // ============ 关注相关 ============
+    public const string FollowUser = "follow:user";
+    public const string FollowRead = "follow:read";
+    public const string FollowManage = "follow:manage";
+
+    // ============ 系统设置相关 ============
+    public const string SystemSettingRead = "system-setting:read";
+    public const string SystemSettingUpdate = "system-setting:update";
+
     // ============ B 权限覆盖的权限代码（权限管理 + 用户组管理）============
     public static readonly HashSet<string> BPermissionOverrides = new()
     {
