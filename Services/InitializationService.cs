@@ -4,7 +4,6 @@ using UserManagementSystem.Configuration;
 using UserManagementSystem.Data;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
-using UserManagementSystem.Services;
 
 namespace UserManagementSystem.Services;
 
@@ -24,18 +23,17 @@ public class InitializationService : IHostedService
         using var scope = _serviceProvider.CreateScope();
         var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
         var permissionService = scope.ServiceProvider.GetRequiredService<IPermissionService>();
-        var consoleService = scope.ServiceProvider.GetRequiredService<IConsoleService>();
         var appConfig = scope.ServiceProvider.GetRequiredService<AppConfiguration>();
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-        consoleService.PrintInfo("Database", "Connected successfully");
+        _logger.LogInformation("Database: Connected successfully");
 
         // ============ 初始化权限和用户组 ============
         await permissionService.SeedPermissionsAndGroupsAsync();
 
         // ============ 创建系统初始用户（uid=0）============
         var initialGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.InitialGroupName);
-        var systemUser = await context.Users.FirstOrDefaultAsync(u => u.Id == 0);
+        var systemUser = await context.Users.FirstOrDefaultAsync(u => u.Id == 0, cancellationToken);
         if (systemUser == null)
         {
             var systemPassword = GenerateRandomPassword(appConfig.AppSettings.AdminPasswordLength);
@@ -55,7 +53,6 @@ public class InitializationService : IHostedService
             await context.Database.OpenConnectionAsync(cancellationToken);
             try
             {
-                // 保存并修改 sql_mode，允许向自增列插入字面量 0
                 await context.Database.ExecuteSqlRawAsync(
                     "SET @__ucs_old_mode = @@SESSION.sql_mode");
                 await context.Database.ExecuteSqlRawAsync(
@@ -76,8 +73,6 @@ public class InitializationService : IHostedService
                 }
                 finally
                 {
-                    // 无论 INSERT 是否成功，都必须恢复原始 sql_mode，
-                    // 避免连接归还池后影响其他操作
                     await context.Database.ExecuteSqlRawAsync(
                         "SET SESSION sql_mode = @__ucs_old_mode");
                 }
@@ -87,42 +82,32 @@ public class InitializationService : IHostedService
                 await context.Database.CloseConnectionAsync();
             }
 
-            // 将系统用户加入"初始用户"组
             if (initialGroup != null)
             {
                 await permissionService.AddMemberAsync(initialGroup.Id, 0);
             }
 
-            // 写入日志
-            var logPath = Path.Combine(Directory.GetCurrentDirectory(), "logs", "init.log");
-            var logContent = $@"================================================================================
-  User Management System - System Initial User (uid=0)
-  Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC
-================================================================================
-
-Username: system
-Email: system@internal.local
-Password: {systemPassword}
-
-This user holds the A (supreme) permission via the '{PermissionCodes.InitialGroupName}' group.
-Keep these credentials extremely secure.
-
-================================================================================
-";
-            await File.AppendAllTextAsync(logPath, logContent, cancellationToken);
-            consoleService.PrintInitSuccess("system", "system@internal.local", systemPassword);
+            // ⚠️ 安全：明文密码仅输出到控制台一次，不写入文件
+            _logger.LogWarning(
+                "======== SYSTEM USER (uid=0) CREATED ========\n" +
+                "  Username: system\n" +
+                "  Email:    system@internal.local\n" +
+                "  Password: {Password}\n" +
+                "  Group:    {Group} (A-level supreme permission)\n" +
+                "  >>> CHANGE THIS PASSWORD IMMEDIATELY <<<\n" +
+                "================================================",
+                systemPassword, PermissionCodes.InitialGroupName);
         }
 
         // ============ 确保 uid=0 始终在初始用户组 ============
         if (initialGroup != null)
         {
             var isMember = await context.UserGroupMembers
-                .AnyAsync(m => m.GroupId == initialGroup.Id && m.UserId == 0);
+                .AnyAsync(m => m.GroupId == initialGroup.Id && m.UserId == 0, cancellationToken);
             if (!isMember)
             {
                 await permissionService.AddMemberAsync(initialGroup.Id, 0);
                 _logger.LogWarning("System user (uid=0) was not in the initial group — auto-repaired");
-                consoleService.PrintWarning("System user (uid=0) was moved back into the initial user group");
             }
         }
 
@@ -148,27 +133,20 @@ Keep these credentials extremely secure.
                 await permissionService.AddMemberAsync(superAdminGroup.Id, adminUser.Id);
             }
 
-            var logPath = Path.Combine(Directory.GetCurrentDirectory(), "logs", "init.log");
-            var logContent = $@"================================================================================
-  User Management System - Super Administrator Account
-  Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC
-================================================================================
-
-Username: admin
-Email: admin@system.local
-Password: {adminPassword}
-
-This user is in the '{PermissionCodes.SuperAdminGroupName}' group with all permissions except A.
-Please login and change the password immediately.
-
-================================================================================
-";
-            await File.AppendAllTextAsync(logPath, logContent, cancellationToken);
-            consoleService.PrintInitSuccess("admin", "admin@system.local", adminPassword);
+            // ⚠️ 安全：明文密码仅输出到控制台一次，不写入文件
+            _logger.LogWarning(
+                "======== ADMIN ACCOUNT CREATED ========\n" +
+                "  Username: admin\n" +
+                "  Email:    admin@system.local\n" +
+                "  Password: {Password}\n" +
+                "  Group:    {Group} (all permissions except A)\n" +
+                "  >>> CHANGE THIS PASSWORD IMMEDIATELY <<<\n" +
+                "==========================================",
+                adminPassword, PermissionCodes.SuperAdminGroupName);
         }
         else
         {
-            consoleService.PrintSuccess("Administrator account already exists, skipping initialization");
+            _logger.LogInformation("Administrator account already exists, skipping initialization");
         }
     }
 

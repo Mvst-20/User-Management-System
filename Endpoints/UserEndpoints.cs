@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using UserManagementSystem.Configuration;
 using UserManagementSystem.DTOs;
@@ -12,6 +13,29 @@ namespace UserManagementSystem.Endpoints;
 public static class UserEndpoints
 {
     private static readonly object _rateLimitLock = new object();
+
+    /// <summary>
+    /// 查询当前速率限制计数（不递增）
+    /// </summary>
+    private static int GetRateLimitCount(IMemoryCache cache, string key)
+    {
+        lock (_rateLimitLock)
+        {
+            return cache.TryGetValue(key, out int count) ? count : 0;
+        }
+    }
+
+    /// <summary>
+    /// 递增速率限制计数
+    /// </summary>
+    private static void IncrementRateLimit(IMemoryCache cache, string key, TimeSpan window)
+    {
+        lock (_rateLimitLock)
+        {
+            var count = cache.TryGetValue(key, out int current) ? current : 0;
+            cache.Set(key, count + 1, window);
+        }
+    }
 
     /// <summary>
     /// 原子化的速率限制检查：检查限制并在允许时递增计数
@@ -90,7 +114,7 @@ public static class UserEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "邮箱已被注册"));
             }
 
-            // 创建用户
+            // 创建用户（捕获并发写入导致的唯一键冲突）
             var user = new User
             {
                 Username = request.Username,
@@ -101,7 +125,15 @@ public static class UserEndpoints
                 Extras = request.Extras?.GetRawText()
             };
 
-            await userService.CreateUserAsync(user);
+            try
+            {
+                await userService.CreateUserAsync(user);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is MySqlConnector.MySqlException mysqlEx && mysqlEx.ErrorCode == MySqlConnector.MySqlErrorCode.DuplicateKeyEntry)
+            {
+                // 并发注册导致唯一键冲突，返回友好提示
+                return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "该用户名或邮箱已被注册"));
+            }
 
             // 自动加入"普通用户"组
             var normalGroup = await permissionService.GetGroupByNameAsync(PermissionCodes.NormalGroupName);
@@ -151,25 +183,27 @@ public static class UserEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放登录"), statusCode: 403);
             }
 
-            // 登录暴力破解防护：基于 IP + 登录标识限流
+            // 登录限流 key
             var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             var loginKey = request.Login ?? string.Empty;
             var ipKey = $"login_ip_{clientIp}";
             var accountKey = $"login_account_{loginKey}";
 
-            // IP 限流：同一 IP 5 分钟内最多 20 次失败
-            if (IsRateLimited(cache, ipKey, 20, TimeSpan.FromMinutes(5)))
+            // IP 限流检查：同一 IP 5 分钟内最多 20 次
+            if (GetRateLimitCount(cache, ipKey) >= 20)
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
 
-            // 账号限流：同一账号 5 分钟内最多 5 次失败
-            if (IsRateLimited(cache, accountKey, 5, TimeSpan.FromMinutes(5)))
+            // 账号限流检查：同一账号 5 分钟内最多 5 次
+            if (GetRateLimitCount(cache, accountKey) >= 5)
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
 
             var user = await userService.ValidateCredentialsAsync(request.Login ?? string.Empty, request.Password);
 
             if (user == null)
             {
-                // 登录失败，递增计数已在 IsRateLimited 中完成
+                // 登录失败，递增限流计数
+                IncrementRateLimit(cache, ipKey, TimeSpan.FromMinutes(5));
+                IncrementRateLimit(cache, accountKey, TimeSpan.FromMinutes(5));
                 return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_UserNotFound, "用户名或密码错误"));
             }
 

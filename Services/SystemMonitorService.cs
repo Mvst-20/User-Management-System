@@ -135,13 +135,12 @@ public class SystemMonitorService : ISystemMonitorService
         try
         {
             var tickCount = Environment.TickCount64;
-            _logger.LogInformation("Environment.TickCount64: {TickCount} ms ({Days} days)", tickCount, tickCount / 86400000.0);
+            if (tickCount <= 0) throw new InvalidOperationException("TickCount64 returned zero");
             return TimeSpan.FromMilliseconds(tickCount);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to get system uptime from TickCount64");
-            // 回退到进程启动时间
+            _logger.LogDebug(ex, "TickCount64 unavailable, falling back to process start time");
             var process = Process.GetCurrentProcess();
             return DateTime.UtcNow - process.StartTime.ToUniversalTime();
         }
@@ -178,26 +177,21 @@ public class SystemMonitorService : ISystemMonitorService
     private double GetWindowsCpuUsage()
     {
         var result = GetSystemTimes(out var idleTime, out var kernelTime, out var userTime);
-        _logger.LogInformation("GetSystemTimes result: {Result}, idle: {Idle}, kernel: {Kernel}, user: {User}",
-            result, idleTime, kernelTime, userTime);
 
         if (!result)
         {
-            _logger.LogWarning("GetSystemTimes failed, error: {Error}", Marshal.GetLastWin32Error());
+            _logger.LogDebug("GetSystemTimes failed (code {Error}), reusing previous CPU value",
+                Marshal.GetLastWin32Error());
             return _cpuUsage;
         }
 
         var idleDelta = idleTime - _lastIdleTime;
         var kernelDelta = kernelTime - _lastKernelTime;
         var userDelta = userTime - _lastUserTime;
-
         var totalDelta = kernelDelta + userDelta;
-        _logger.LogInformation("CPU deltas - idle: {IdleDelta}, kernel: {KernelDelta}, user: {UserDelta}, total: {TotalDelta}",
-            idleDelta, kernelDelta, userDelta, totalDelta);
 
         if (totalDelta > 0)
         {
-            // CPU 使用率 = (总时间 - 空闲时间) / 总时间 * 100
             _cpuUsage = (1.0 - (double)idleDelta / totalDelta) * 100.0;
             _cpuUsage = Math.Max(0, Math.Min(100, _cpuUsage));
         }
@@ -316,8 +310,6 @@ public class SystemMonitorService : ISystemMonitorService
         {
             var memInfo = new MEMORYSTATUSEX();
             var result = GlobalMemoryStatusEx(memInfo);
-            _logger.LogInformation("GlobalMemoryStatusEx result: {Result}, dwMemoryLoad: {Load}, ullTotalPhys: {Total}, ullAvailPhys: {Avail}",
-                result, memInfo.dwMemoryLoad, memInfo.ullTotalPhys, memInfo.ullAvailPhys);
 
             if (result)
             {
@@ -329,16 +321,15 @@ public class SystemMonitorService : ISystemMonitorService
             }
             else
             {
-                _logger.LogWarning("GlobalMemoryStatusEx failed, error: {Error}", Marshal.GetLastWin32Error());
+                _logger.LogDebug("GlobalMemoryStatusEx failed (code {Error}), using fallback", Marshal.GetLastWin32Error());
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to get Windows memory info via GlobalMemoryStatusEx");
+            _logger.LogDebug(ex, "GlobalMemoryStatusEx unavailable, using process memory fallback");
         }
 
-        // 回退方案
-        _logger.LogWarning("Using fallback memory info (process memory)");
+        // Fallback: process-level memory (GC info)
         var gcInfo = GC.GetGCMemoryInfo();
         var fallbackTotal = gcInfo.TotalAvailableMemoryBytes;
         var fallbackUsed = Environment.WorkingSet;

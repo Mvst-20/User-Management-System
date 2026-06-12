@@ -173,10 +173,16 @@ public static class AvatarEndpoints
         // 上传/更换头像（允许本人或拥有 avatar:upload 权限）
         app.MapPost("/api/users/{id}/avatar", async (
             ulong id,
-            IFormFile file,
+            IFormFile? file,
             [FromServices] IUserService userService,
             HttpContext httpContext) =>
         {
+            // 空文件检查
+            if (file == null || file.Length == 0)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "请选择要上传的图片"));
+            }
+
             var user = await userService.GetByIdAsync(id);
             if (user == null || user.Status == UserStatus.Deleted)
             {
@@ -220,41 +226,45 @@ public static class AvatarEndpoints
             var fileName = $"{baseName}{extension}";
             var filePath = Path.Combine(avatarsPath, fileName);
 
-            // 删除旧头像（原图 + 缩略图）
-            DeleteAvatarFiles(avatarsPath, user.AvatarUrl);
-
             // 压缩处理
             fileStream.Position = 0;
             var (compressed, thumbnail) = CompressImage(fileStream, extension, file.Length);
 
             bool hasThumbnail = false;
+            string? oldAvatarUrl = user.AvatarUrl;
 
-            if (compressed != null && thumbnail != null)
+            try
             {
-                // 文件大于 512KB，已压缩
-                await File.WriteAllBytesAsync(filePath, compressed);
-
-                // 保存缩略图
-                var thumbPath = GetThumbnailPath(avatarsPath, fileName);
-                await File.WriteAllBytesAsync(thumbPath, thumbnail);
-                hasThumbnail = true;
-            }
-            else
-            {
-                // 文件小于等于 512KB，直接保存原图，缩略图 = 原图
-                fileStream.Position = 0;
-                using (var stream = new FileStream(filePath, FileMode.Create))
+                if (compressed != null && thumbnail != null)
                 {
+                    await File.WriteAllBytesAsync(filePath, compressed);
+                    var thumbPath = GetThumbnailPath(avatarsPath, fileName);
+                    await File.WriteAllBytesAsync(thumbPath, thumbnail);
+                    hasThumbnail = true;
+                }
+                else
+                {
+                    fileStream.Position = 0;
+                    using var stream = new FileStream(filePath, FileMode.Create);
                     await fileStream.CopyToAsync(stream);
                 }
+
+                // 先更新数据库指向新文件
+                user.AvatarUrl = $"/avatars/{fileName}";
+                await userService.UpdateUserAsync(user);
+
+                // DB 更新成功后再删除旧文件
+                DeleteAvatarFiles(avatarsPath, oldAvatarUrl);
+
+                return Results.Ok(new ApiResponse(ResultCodes.UploadAvatarSuccess, "头像上传成功",
+                    new AvatarUploadDataResponse(user.AvatarUrl, hasThumbnail)));
             }
-
-            // 更新用户头像路径
-            user.AvatarUrl = $"/avatars/{fileName}";
-            await userService.UpdateUserAsync(user);
-
-            return Results.Ok(new ApiResponse(ResultCodes.UploadAvatarSuccess, "头像上传成功",
-                new AvatarUploadDataResponse(user.AvatarUrl, hasThumbnail)));
+            catch
+            {
+                // 新文件保存失败，清理已写入的部分
+                DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
+                throw;
+            }
         }).RequireAuthorization().RequirePermission(PermissionCodes.AvatarUpload, allowSelf: true);
 
         // 删除头像（允许本人或拥有 avatar:delete 权限）

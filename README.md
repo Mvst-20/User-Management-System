@@ -33,6 +33,7 @@
 - MailKit (SMTP 邮件发送)
 - BCrypt.Net-Next
 - SixLabors.ImageSharp
+- Serilog.AspNetCore (结构化日志)
 
 ## 快速开始
 
@@ -141,7 +142,7 @@ dotnet run --environment Production
 - 初始化用户组（初始用户、超级管理员、管理员、普通用户）
 - 创建系统初始用户（uid=0，用户名: `system`，持有 A 权限）
 - 生成超级管理员账户（用户名: `admin`，邮箱: `admin@system.local`，属于"超级管理员"组）
-- 在控制台和 `logs/init.log` 中显示随机生成的密码
+- 在控制台中显示随机生成的密码（⚠️ 请立即登录修改）
 
 ## 生产环境部署清单
 
@@ -492,7 +493,7 @@ UCS/
 │   └── UserService.cs             # 用户业务逻辑
 ├── wwwroot/
 │   └── avatars/        # 头像存储
-├── logs/               # 日志文件
+├── logs/               # Serilog 结构化日志（access/error/app 每日滚动）
 ├── appsettings.json    # 应用配置
 ├── LICENSE             # Apache License 2.0
 └── Program.cs          # 入口点
@@ -501,30 +502,42 @@ UCS/
 ## 安全说明
 
 1. 首次运行后请立即登录并修改管理员密码
-2. 初始管理员密码会输出到控制台和 `logs/init.log`
-3. 系统初始用户（uid=0）密码同样会输出到 `logs/init.log`，请妥善保管
-4. **生产环境请务必修改 JWT Key**（至少 64 字符的随机字符串）
-5. **生产环境请务必修改数据库密码**
-6. 生产环境请配置 `AllowedOrigins` 限制跨域来源
-7. 生产环境请配置 `ApiBaseUrl` 为 HTTPS 地址
-8. 密码使用 BCrypt Work Factor 12 存储
-9. 邮件发送频率限制：同一邮箱 1 分钟内只能请求一次
-10. 注册频率限制：同一邮箱每分钟最多 5 次
-11. 封禁用户无法登录，也无法获取 JWT Token
-12. 头像端点已做路径遍历防护
-13. 头像上传验证文件魔数签名（magic bytes），防止 Content-Type 伪装
-14. 头像大于 512KB 时自动压缩，生成 256px 缩略图，减少存储和传输开销
-15. 登录暴力破解防护：IP 20次/5分钟 + 账号 5次/5分钟双重限流
-16. JWT Token 支持黑名单撤销，登出和密码修改时自动撤销当前 Token 和 Refresh Token
-17. 支持 Refresh Token 机制（30 天有效），免密刷新 Access Token
-18. 异常中间件在生产环境隐藏内部错误详情
-19. A 权限仅限"初始用户"组，无法分配给其他用户组
-20. 特殊权限（A/B/C）不可通过 API 创建、修改或删除
-21. 权限检查结果带内存缓存（5 分钟过期），修改权限后自动清除对应用户缓存
-22. 自定义权限记录创建人（`creator_id`），系统内置权限创建人为 null
-23. 系统初始用户（uid=0）不可删除、不可修改、不可从初始用户组移除
-24. 启动时自动检查 uid=0 是否在初始用户组，若不在则自动修复
-25. SMTP 连接默认使用加密（端口 587=STARTTLS，465=SSL，其他端口默认 STARTTLS）
+2. 初始管理员密码和系统用户密码仅输出到控制台一次，**不会持久化到文件**
+3. **生产环境请务必修改 JWT Key**（至少 64 字符的随机字符串）
+4. **生产环境请务必修改数据库密码**
+5. 生产环境请配置 `AllowedOrigins` 限制跨域来源
+6. 生产环境请配置 `ApiBaseUrl` 为 HTTPS 地址
+7. 密码使用 BCrypt Work Factor 12 存储
+8. 邮件发送频率限制：同一邮箱 1 分钟内只能请求一次
+9. 注册频率限制：同一邮箱每分钟最多 5 次
+10. 封禁用户无法登录，也无法获取 JWT Token
+11. 头像端点已做路径遍历防护
+12. 头像上传验证文件魔数签名（magic bytes），防止 Content-Type 伪装
+13. 头像大于 512KB 时自动压缩，生成 256px 缩略图，减少存储和传输开销
+14. 登录暴力破解防护：IP 20次/5分钟 + 账号 5次/5分钟双重限流
+15. JWT Token 支持黑名单撤销，登出和密码修改时自动撤销当前 Token 和 Refresh Token
+16. 支持 Refresh Token 机制（30 天有效），免密刷新 Access Token
+17. 异常中间件在生产环境隐藏内部错误详情
+18. A 权限仅限"初始用户"组，无法分配给其他用户组
+19. 特殊权限（A/B/C）不可通过 API 创建、修改或删除
+20. 权限检查结果带内存缓存（5 分钟过期），修改权限后自动清除对应用户缓存
+21. 自定义权限记录创建人（`creator_id`），系统内置权限创建人为 null
+22. 系统初始用户（uid=0）不可删除、不可修改、不可从初始用户组移除
+23. 启动时自动检查 uid=0 是否在初始用户组，若不在则自动修复
+24. SMTP 连接默认使用加密（端口 587=STARTTLS，465=SSL，其他端口默认 STARTTLS）
+
+## 日志系统
+
+使用 Serilog 结构化日志，输出三类文件：
+
+```
+logs/
+├── access-YYYYMMDD.log    # HTTP请求日志（保留30天）
+├── error-YYYYMMDD.log     # 错误日志（保留90天）
+└── app-YYYYMMDD.log       # 业务日志（保留30天）
+```
+
+控制台输出格式：`[HH:mm:ss LVL] Message`（仅 Information+）。通过 `appsettings.json` 中的 `Serilog:MinimumLevel` 配置日志级别。
 
 ## 许可证
 

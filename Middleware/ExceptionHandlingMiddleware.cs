@@ -24,9 +24,36 @@ public class ExceptionHandlingMiddleware
         {
             await _next(context);
         }
+        catch (OperationCanceledException)
+        {
+            // Client disconnected / request aborted — not an application error
+        }
+        catch (BadHttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "[BAD_REQUEST] {Method} {Path} from {IP} — {Message}",
+                context.Request.Method, context.Request.Path,
+                context.Connection.RemoteIpAddress, ex.Message);
+
+            context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+            context.Response.ContentType = "application/json";
+            var response = new ApiResponse(ResultCodes.ValidationError, "请求格式错误");
+            var json = JsonSerializer.Serialize(response, AppJsonSerializerContext.Default.ApiResponse);
+            await context.Response.WriteAsync(json);
+        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "An unhandled exception occurred");
+            // Extract request context for structured log
+            var method = context.Request.Method;
+            var path = context.Request.Path + context.Request.QueryString;
+            var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var userId = context.User?.FindFirst("uid")?.Value
+                ?? context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                ?? "anonymous";
+
+            _logger.LogError(ex,
+                "[UNHANDLED] {Method} {Path} | User={UserId} | IP={IP} | Type={ExceptionType} | {Message}",
+                method, path, userId, ip, ex.GetType().Name, ex.Message);
+
             await HandleExceptionAsync(context, ex);
         }
     }
@@ -44,9 +71,7 @@ public class ExceptionHandlingMiddleware
             _ => (HttpStatusCode.InternalServerError, ResultCodes.InternalServerError, "服务器内部错误")
         };
 
-        // 开发环境返回详细错误信息，生产环境返回友好提示
         var displayMessage = _env.IsDevelopment() ? exception.Message : message;
-
         context.Response.StatusCode = (int)statusCode;
 
         var response = new ApiResponse(code, displayMessage);
