@@ -206,6 +206,7 @@ try
     {
         options.AddDefaultPolicy(policy =>
         {
+            // 读配置：逗号分隔白名单（如 "https://32px.top,https://bwbt.top"）
             var allowedOrigins = appConfig.AppSettings.AllowedOrigins;
             if (!string.IsNullOrEmpty(allowedOrigins))
             {
