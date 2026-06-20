@@ -40,7 +40,7 @@ public static class PermissionEndpoints
         .RequireAuthorization()
         .RequirePermission(PermissionCodes.PermissionRead);
 
-        // 权限检查
+        // 权限检查（支持单码 + 批量两种模式）
         app.MapPost("/api/permissions/check", async (
             [FromBody] CheckPermissionRequest request,
             [FromServices] IPermissionService permissionService,
@@ -63,6 +63,23 @@ public static class PermissionEndpoints
                     return Results.Json(new ApiResponse(ResultCodes.Forbidden, "权限不足，查看他人权限需要 permission:read 权限"), statusCode: 403);
                 }
             }
+
+            // ── 批量模式（codes 非空，供 BWB/IHS 等子系统使用）──
+            if (request.Codes is { Length: > 0 })
+            {
+                var userPermissionCodes = await permissionService.GetUserPermissionCodesAsync(targetUserId.Value);
+                var items = request.Codes.Select(code => new PermissionCheckItem(
+                    code,
+                    userPermissionCodes.Contains(code) || userPermissionCodes.Contains(PermissionCodes.PermA)
+                )).ToList();
+
+                return Results.Ok(new ApiResponse(ResultCodes.PermissionCheckSuccess, "检查完成",
+                    new BulkCheckPermissionResponse(targetUserId.Value, items)));
+            }
+
+            // ── 单码模式（向后兼容）──
+            if (string.IsNullOrEmpty(request.PermissionCode))
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "权限代码不能为空"));
 
             var hasPermission = await permissionService.HasPermissionAsync(targetUserId.Value, request.PermissionCode);
 

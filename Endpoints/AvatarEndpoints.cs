@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.Formats.Webp;
 using SixLabors.ImageSharp.Processing;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Extensions;
@@ -194,9 +195,10 @@ public static class AvatarEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
-            // 验证文件类型
-            var allowedTypes = new[] { "image/jpeg", "image/png", "image/gif", "image/webp" };
-            if (!allowedTypes.Contains(file.ContentType.ToLower()))
+            // 验证文件类型（宽松匹配：支持 image/jpg 非标类型、忽略 charset 后缀）
+            var mime = file.ContentType.ToLower().Split(';')[0].Trim();
+            var allowedTypes = new[] { "image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg" };
+            if (!allowedTypes.Contains(mime))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "只支持 JPG、PNG、GIF、WebP 格式的图片"));
             }
@@ -221,20 +223,20 @@ public static class AvatarEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "文件内容与声明的图片格式不匹配"));
             }
 
-            // 生成文件名（使用固定安全扩展名，不使用用户提供的扩展名）
+            // 生成文件名
             var baseName = $"{user.Id}_{Guid.NewGuid():N}";
             var fileName = $"{baseName}{extension}";
             var filePath = Path.Combine(avatarsPath, fileName);
-
-            // 压缩处理
-            fileStream.Position = 0;
-            var (compressed, thumbnail) = CompressImage(fileStream, extension, file.Length);
-
-            bool hasThumbnail = false;
             string? oldAvatarUrl = user.AvatarUrl;
 
             try
             {
+                // 压缩处理（包含在 try 内，捕获图片解码异常）
+                fileStream.Position = 0;
+                var (compressed, thumbnail) = CompressImage(fileStream, extension, file.Length);
+
+                bool hasThumbnail = false;
+
                 if (compressed != null && thumbnail != null)
                 {
                     await File.WriteAllBytesAsync(filePath, compressed);
@@ -249,19 +251,26 @@ public static class AvatarEndpoints
                     await fileStream.CopyToAsync(stream);
                 }
 
-                // 先更新数据库指向新文件
+                // DB 更新成功后再清理旧文件
                 user.AvatarUrl = $"/avatars/{fileName}";
                 await userService.UpdateUserAsync(user);
-
-                // DB 更新成功后再删除旧文件
                 DeleteAvatarFiles(avatarsPath, oldAvatarUrl);
 
                 return Results.Ok(new ApiResponse(ResultCodes.UploadAvatarSuccess, "头像上传成功",
                     new AvatarUploadDataResponse(user.AvatarUrl, hasThumbnail)));
             }
+            catch (UnknownImageFormatException)
+            {
+                DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "不支持的图片格式或图片已损坏"));
+            }
+            catch (InvalidImageContentException)
+            {
+                DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "图片内容无效或已损坏"));
+            }
             catch
             {
-                // 新文件保存失败，清理已写入的部分
                 DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
                 throw;
             }

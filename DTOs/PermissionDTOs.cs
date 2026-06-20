@@ -47,16 +47,28 @@ public record PermissionResponse(
 // ============ 权限检查 DTOs ============
 
 public record CheckPermissionRequest(
-    [Required(ErrorMessage = "权限代码不能为空")]
-    string PermissionCode,
+    [StringLength(64, ErrorMessage = "权限代码长度不能超过64个字符")]
+    string? PermissionCode = null,   // 单码模式（兼容旧调用方）
 
-    ulong? UserId = null
+    ulong? UserId = null,
+
+    string[]? Codes = null          // 批量模式（BWB/IHS 等子系统使用）
 );
 
 public record CheckPermissionResponse(
     ulong UserId,
     string PermissionCode,
     bool HasPermission
+);
+
+public record BulkCheckPermissionResponse(
+    ulong UserId,
+    List<PermissionCheckItem> Permissions
+);
+
+public record PermissionCheckItem(
+    string Code,
+    bool Granted
 );
 
 // ============ 用户组请求 DTOs ============
