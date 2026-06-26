@@ -195,12 +195,15 @@ public static class AvatarEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
-            // 验证文件类型（宽松匹配：支持 image/jpg 非标类型、忽略 charset 后缀）
-            var mime = file.ContentType.ToLower().Split(';')[0].Trim();
-            var allowedTypes = new[] { "image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg" };
-            if (!allowedTypes.Contains(mime))
+            // 仅在客户端提供了 Content-Type 时校验（真正的安全防线是下方的魔数验证）
+            var mime = file.ContentType?.Split(';')[0].Trim().ToLowerInvariant();
+            if (!string.IsNullOrEmpty(mime))
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "只支持 JPG、PNG、GIF、WebP 格式的图片"));
+                var allowedTypes = new[] { "image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg" };
+                if (!allowedTypes.Contains(mime))
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "只支持 JPG、PNG、GIF、WebP 格式的图片"));
+                }
             }
 
             // 验证文件扩展名（防止 XSS：拒绝 .html/.svg 等）
