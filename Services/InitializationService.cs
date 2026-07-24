@@ -20,6 +20,19 @@ public class InitializationService : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        try
+        {
+            await StartInternalAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "初始化失败，系统将以降级模式运行: {Message}", ex.Message);
+            // 不重新抛出异常，允许应用在部分功能可用的情况下继续运行
+        }
+    }
+
+    private async Task StartInternalAsync(CancellationToken cancellationToken)
+    {
         using var scope = _serviceProvider.CreateScope();
         var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
         var permissionService = scope.ServiceProvider.GetRequiredService<IPermissionService>();

@@ -58,7 +58,11 @@ public class PermissionService : IPermissionService
             .ToListAsync();
 
         if (!groupIds.Any())
+        {
+            // 缓存空结果，避免每次无权限用户请求都查询数据库
+            _cache.Set(cacheKey, new List<string>(), CacheDuration);
             return new List<string>();
+        }
 
         var permissionCodes = await _context.UserGroupPermissions
             .Where(gp => groupIds.Contains(gp.GroupId))

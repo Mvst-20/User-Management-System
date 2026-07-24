@@ -70,7 +70,7 @@ public static class PermissionEndpoints
                 var userPermissionCodes = await permissionService.GetUserPermissionCodesAsync(targetUserId.Value);
                 var items = request.Codes.Select(code => new PermissionCheckItem(
                     code,
-                    userPermissionCodes.Contains(code) || userPermissionCodes.Contains(PermissionCodes.PermA)
+                    HasPermissionCoverage(userPermissionCodes, code)
                 )).ToList();
 
                 return Results.Ok(new ApiResponse(ResultCodes.PermissionCheckSuccess, "检查完成",
@@ -194,5 +194,29 @@ public static class PermissionEndpoints
         })
         .RequireAuthorization()
         .RequirePermission(PermissionCodes.PermissionDelete);
+    }
+
+    /// <summary>
+    /// 判断用户权限列表中是否存在覆盖目标权限的权限。
+    /// 与 <see cref="IPermissionService.HasPermissionAsync"/> 使用相同的 ABC 覆盖规则。
+    /// </summary>
+    private static bool HasPermissionCoverage(List<string> userPermissionCodes, string targetCode)
+    {
+        // PermA 覆盖所有权限
+        if (userPermissionCodes.Contains(PermissionCodes.PermA))
+            return true;
+
+        // PermB 覆盖 BPermissionOverrides 中的权限
+        if (userPermissionCodes.Contains(PermissionCodes.PermB)
+            && PermissionCodes.BPermissionOverrides.Contains(targetCode))
+            return true;
+
+        // PermC 覆盖 CPermissionOverrides 中的权限
+        if (userPermissionCodes.Contains(PermissionCodes.PermC)
+            && PermissionCodes.CPermissionOverrides.Contains(targetCode))
+            return true;
+
+        // 精确匹配
+        return userPermissionCodes.Contains(targetCode);
     }
 }

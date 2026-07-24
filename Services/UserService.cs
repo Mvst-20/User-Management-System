@@ -9,11 +9,13 @@ public class UserService : IUserService
 {
     private readonly ApplicationDbContext _context;
     private readonly IOnlineUserService _onlineUserService;
+    private readonly IPermissionService _permissionService;
 
-    public UserService(ApplicationDbContext context, IOnlineUserService onlineUserService)
+    public UserService(ApplicationDbContext context, IOnlineUserService onlineUserService, IPermissionService permissionService)
     {
         _context = context;
         _onlineUserService = onlineUserService;
+        _permissionService = permissionService;
     }
 
     public async Task<User?> GetByIdAsync(ulong id)
@@ -64,6 +66,10 @@ public class UserService : IUserService
 
         user.Status = UserStatus.Deleted;
         await _context.SaveChangesAsync();
+
+        // 清除被删除用户的权限缓存
+        await _permissionService.InvalidateUserPermissionCacheAsync(id);
+
         return true;
     }
 

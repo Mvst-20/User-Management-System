@@ -68,8 +68,12 @@ public class RefreshTokenService : IRefreshTokenService
         if (user == null)
             return null;
 
-        // 验证通过后立即轮换：旧 token 失效，防止重放攻击
-        // 但新的 refresh token 在调用方生成（GenerateAsync）
+        // 验证通过后立即清除旧 token，防止重放攻击
+        // 新的 refresh token 由调用方随后通过 GenerateAsync 生成
+        user.RefreshToken = null;
+        user.RefreshTokenExpiresAt = null;
+        await _context.SaveChangesAsync();
+
         return user;
     }
 

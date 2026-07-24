@@ -178,51 +178,73 @@ public static class AvatarEndpoints
             [FromServices] IUserService userService,
             HttpContext httpContext) =>
         {
+            try
+            {
+            var logger = httpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("AvatarUpload");
+
+            // === 诊断：记录请求基本信息 ===
+            var reqContentType = httpContext.Request.ContentType ?? "(null)";
+            logger.LogInformation("[AVATAR-UPLOAD] START id={UserId}, fileParam={HasFile}, fileName={FileName}, fileSize={FileSize}, contentType={ContentType}",
+                id,
+                file != null,
+                file?.FileName ?? "(null)",
+                file?.Length ?? -1,
+                reqContentType);
+
             // 空文件检查
             if (file == null || file.Length == 0)
             {
+                logger.LogWarning("[AVATAR-UPLOAD] FAIL: file is null or empty");
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "请选择要上传的图片"));
             }
 
             var user = await userService.GetByIdAsync(id);
             if (user == null || user.Status == UserStatus.Deleted)
             {
+                logger.LogWarning("[AVATAR-UPLOAD] FAIL: user {UserId} not found or deleted", id);
                 return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
             }
 
             if (user.Status == UserStatus.Banned)
             {
+                logger.LogWarning("[AVATAR-UPLOAD] FAIL: user {UserId} is banned", id);
                 return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
-            // 仅在客户端提供了 Content-Type 时校验（真正的安全防线是下方的魔数验证）
-            var mime = file.ContentType?.Split(';')[0].Trim().ToLowerInvariant();
-            if (!string.IsNullOrEmpty(mime))
-            {
-                var allowedTypes = new[] { "image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg" };
-                if (!allowedTypes.Contains(mime))
-                {
-                    return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "只支持 JPG、PNG、GIF、WebP 格式的图片"));
-                }
-            }
-
             // 验证文件扩展名（防止 XSS：拒绝 .html/.svg 等）
-            var extension = Path.GetExtension(file.FileName).ToLower();
-            if (!AllowedExtensions.Contains(extension))
+            // FileName 安全处理：浏览器发来的文件名通常不含路径，但做防御性处理
+            var safeFileName = Path.GetFileName((file.FileName ?? string.Empty).Trim());
+            var extension = string.IsNullOrEmpty(safeFileName)
+                ? string.Empty
+                : Path.GetExtension(safeFileName).ToLowerInvariant();
+
+            logger.LogInformation("[AVATAR-UPLOAD] STEP1: extension='{Ext}', originalFileName='{OrigName}'",
+                extension, file.FileName);
+
+            if (string.IsNullOrEmpty(extension) || !AllowedExtensions.Contains(extension))
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "不支持的文件扩展名"));
+                logger.LogWarning("[AVATAR-UPLOAD] FAIL: invalid extension '{Ext}'", extension);
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType,
+                    string.IsNullOrEmpty(extension) ? "文件缺少扩展名" : "不支持的文件扩展名"));
             }
 
             // 验证文件大小（最大 6MB）
             if (file.Length > 6 * 1024 * 1024)
             {
+                logger.LogWarning("[AVATAR-UPLOAD] FAIL: file too large {Size} bytes", file.Length);
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_FileTooLarge, "图片大小不能超过 6MB"));
             }
 
             // 验证文件内容（magic bytes），防止 Content-Type 伪装
             using var fileStream = file.OpenReadStream();
-            if (!ValidateFileSignature(fileStream, extension))
+            var isValidSignature = ValidateFileSignature(fileStream, extension);
+            logger.LogInformation("[AVATAR-UPLOAD] STEP2: magicBytes valid={IsValid}, streamLen={Len}",
+                isValidSignature, fileStream.Length);
+
+            if (!isValidSignature)
             {
+                logger.LogWarning("[AVATAR-UPLOAD] FAIL: magic bytes mismatch for extension '{Ext}'", extension);
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "文件内容与声明的图片格式不匹配"));
             }
 
@@ -231,6 +253,9 @@ public static class AvatarEndpoints
             var fileName = $"{baseName}{extension}";
             var filePath = Path.Combine(avatarsPath, fileName);
             string? oldAvatarUrl = user.AvatarUrl;
+
+            logger.LogInformation("[AVATAR-UPLOAD] STEP3: saving to '{Path}', oldAvatar={OldAvatar}",
+                filePath, oldAvatarUrl ?? "(null)");
 
             try
             {
@@ -242,6 +267,8 @@ public static class AvatarEndpoints
 
                 if (compressed != null && thumbnail != null)
                 {
+                    logger.LogInformation("[AVATAR-UPLOAD] STEP4: compressed (orig={Orig}B → compressed={Comp}B + thumb={Thumb}B)",
+                        file.Length, compressed.Length, thumbnail.Length);
                     await File.WriteAllBytesAsync(filePath, compressed);
                     var thumbPath = GetThumbnailPath(avatarsPath, fileName);
                     await File.WriteAllBytesAsync(thumbPath, thumbnail);
@@ -249,6 +276,7 @@ public static class AvatarEndpoints
                 }
                 else
                 {
+                    logger.LogInformation("[AVATAR-UPLOAD] STEP4: no compression needed, copying raw ({Size}B)", file.Length);
                     fileStream.Position = 0;
                     using var stream = new FileStream(filePath, FileMode.Create);
                     await fileStream.CopyToAsync(stream);
@@ -257,27 +285,50 @@ public static class AvatarEndpoints
                 // DB 更新成功后再清理旧文件
                 user.AvatarUrl = $"/avatars/{fileName}";
                 await userService.UpdateUserAsync(user);
+                logger.LogInformation("[AVATAR-UPLOAD] STEP5: DB updated, new avatarUrl='{Url}'", user.AvatarUrl);
                 DeleteAvatarFiles(avatarsPath, oldAvatarUrl);
+
+                logger.LogInformation("[AVATAR-UPLOAD] SUCCESS: userId={UserId}, avatarUrl='{Url}', hasThumb={Thumb}",
+                    id, user.AvatarUrl, hasThumbnail);
 
                 return Results.Ok(new ApiResponse(ResultCodes.UploadAvatarSuccess, "头像上传成功",
                     new AvatarUploadDataResponse(user.AvatarUrl, hasThumbnail)));
             }
-            catch (UnknownImageFormatException)
+            catch (UnknownImageFormatException ex)
             {
+                logger.LogWarning(ex, "[AVATAR-UPLOAD] FAIL: unknown image format");
                 DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "不支持的图片格式或图片已损坏"));
             }
-            catch (InvalidImageContentException)
+            catch (InvalidImageContentException ex)
             {
+                logger.LogWarning(ex, "[AVATAR-UPLOAD] FAIL: invalid image content");
                 DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
                 return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "图片内容无效或已损坏"));
             }
-            catch
+            catch (InvalidOperationException ex)
             {
+                logger.LogError(ex, "[AVATAR-UPLOAD] FAIL: InvalidOperationException — {Message}", ex.Message);
+                DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType,
+                    $"图片处理失败：{ex.Message}"));
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "[AVATAR-UPLOAD] FAIL: unhandled exception while processing");
                 DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
                 throw;
             }
-        }).RequireAuthorization().RequirePermission(PermissionCodes.AvatarUpload, allowSelf: true);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, $"OUTER-{ex.Message}"));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, $"OUTER-{ex.GetType().Name}:{ex.Message}"));
+            }
+        }).RequireAuthorization().RequirePermission(PermissionCodes.AvatarUpload, allowSelf: true).DisableAntiforgery();
 
         // 删除头像（允许本人或拥有 avatar:delete 权限）
         app.MapDelete("/api/users/{id}/avatar", async (

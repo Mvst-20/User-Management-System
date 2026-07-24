@@ -24,9 +24,9 @@ public class ExceptionHandlingMiddleware
         {
             await _next(context);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
-            // Client disconnected / request aborted — not an application error
+            // Client disconnected / request aborted — not an application error, silently ignore
         }
         catch (BadHttpRequestException ex)
         {
@@ -34,11 +34,8 @@ public class ExceptionHandlingMiddleware
                 context.Request.Method, context.Request.Path,
                 context.Connection.RemoteIpAddress, ex.Message);
 
-            context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-            context.Response.ContentType = "application/json";
-            var response = new ApiResponse(ResultCodes.ValidationError, "请求格式错误");
-            var json = JsonSerializer.Serialize(response, AppJsonSerializerContext.Default.ApiResponse);
-            await context.Response.WriteAsync(json);
+            await TryWriteJsonError(context, (int)HttpStatusCode.BadRequest,
+                new ApiResponse(ResultCodes.ValidationError, "请求格式错误"));
         }
         catch (Exception ex)
         {
@@ -58,10 +55,32 @@ public class ExceptionHandlingMiddleware
         }
     }
 
+    /// <summary>
+    /// 安全写入 JSON 错误响应。
+    /// 如果响应已经开始（HasStarted），则跳过写入避免二次异常导致 HTML 错误页。
+    /// </summary>
+    private static async Task TryWriteJsonError(HttpContext context, int statusCode, ApiResponse response)
+    {
+        if (context.Response.HasStarted)
+            return;
+
+        try
+        {
+            context.Response.StatusCode = statusCode;
+            context.Response.ContentType = "application/json";
+            var jsonResponse = JsonSerializer.Serialize(response);
+            await context.Response.WriteAsync(jsonResponse);
+        }
+        catch (Exception writeEx)
+        {
+            // 写入响应失败（例如连接已断开），仅记录，不再抛出
+            // 避免二次异常导致 ASP.NET 默认 HTML 错误页
+            System.Diagnostics.Debug.WriteLine($"[ExceptionHandlingMiddleware] Failed to write error response: {writeEx.Message}");
+        }
+    }
+
     private async Task HandleExceptionAsync(HttpContext context, Exception exception)
     {
-        context.Response.ContentType = "application/json";
-
         var (statusCode, code, message) = exception switch
         {
             ArgumentException => (HttpStatusCode.BadRequest, ResultCodes.ValidationError, exception.Message),
@@ -71,11 +90,16 @@ public class ExceptionHandlingMiddleware
             _ => (HttpStatusCode.InternalServerError, ResultCodes.InternalServerError, "服务器内部错误")
         };
 
-        var displayMessage = _env.IsDevelopment() ? exception.Message : message;
-        context.Response.StatusCode = (int)statusCode;
+        // 生产环境仅暴露通用错误信息，不泄露异常类型等内部细节
+        var displayMessage = _env.IsDevelopment()
+            ? $"{message}: {exception.Message}"
+            : exception switch
+            {
+                InvalidOperationException => $"处理失败: {exception.Message}",
+                _ => message
+            };
 
-        var response = new ApiResponse(code, displayMessage);
-        var jsonResponse = JsonSerializer.Serialize(response, AppJsonSerializerContext.Default.ApiResponse);
-        await context.Response.WriteAsync(jsonResponse);
+        await TryWriteJsonError(context, (int)statusCode,
+            new ApiResponse(code, displayMessage));
     }
 }

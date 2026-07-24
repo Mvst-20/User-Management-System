@@ -286,6 +286,9 @@ try
     app.UseCors();
     app.UseAuthentication();
     app.UseAuthorization();
+    // 注意：UMS 使用 JWT Bearer Token 认证，不使用 Cookie，
+    // 因此不需要 antiforgery 中间件。
+    // 各端点的 .DisableAntiforgery() 标注可保留作为文档说明，不影响运行。
 
     // ============ Endpoint Mapping ============
     app.MapUserEndpoints();
