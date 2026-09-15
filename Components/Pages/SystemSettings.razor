@@ -1,0 +1,220 @@
+@page "/settings"
+@attribute [Authorize]
+
+@inject UcsApiClient Api
+
+<PageTitle>系统设置 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="系统设置" OnRefresh="LoadAsync" RefreshLoading="_loading">
+    <Actions>
+    </Actions>
+
+    <ChildContent>
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+        <UcsNotice Message="@_success" Kind="success" OnDismiss="@(() => _success = null)" />
+
+        <PermissionGate Code="@PermissionCodes.SystemSettingRead">
+            <Card Bordered="false">
+                <div class="ucs-block-head">
+                    <h2 class="ucs-block-title">站点信息</h2>
+                    @if (!_canEdit)
+                    {
+                        <span class="ucs-chip is-default">只读</span>
+                    }
+                </div>
+                <div class="ucs-form">
+                    <div class="ucs-form-grid">
+                        <div class="ucs-field">
+                            <label class="ucs-field-label">站点名称</label>
+                            <Input @bind-Value="_siteName" Disabled="!_canEdit" />
+                        </div>
+                        <div class="ucs-field">
+                            <label class="ucs-field-label">站点 LOGO 地址</label>
+                            <Input @bind-Value="_logoUrl" Placeholder="可选，图片直链" Disabled="!_canEdit" />
+                        </div>
+                    </div>
+                    <div class="ucs-switch-row">
+                        <Checkbox Checked="_allowLogin" CheckedChanged="@(value => _allowLogin = value)">
+                            允许登录
+                        </Checkbox>
+                        <Checkbox Checked="_allowRegister" CheckedChanged="@(value => _allowRegister = value)">
+                            允许注册
+                        </Checkbox>
+                    </div>
+                    <PermissionGate Code="@PermissionCodes.SystemSettingUpdate">
+                        <div class="ucs-form-actions">
+                            <Button Type="@ButtonType.Primary" OnClick="SaveSiteInfoAsync" Loading="_saving">保存站点信息</Button>
+                        </div>
+                    </PermissionGate>
+                </div>
+            </Card>
+
+            <Card Bordered="false">
+                <div class="ucs-block-head">
+                    <h2 class="ucs-block-title">友情链接</h2>
+                    <PermissionGate Code="@PermissionCodes.SystemSettingUpdate">
+                        <Button OnClick="AddFriendLink">新增一行</Button>
+                    </PermissionGate>
+                </div>
+
+                @if (_friendLinks.Count == 0)
+                {
+                    <Alert Type="@AlertType.Info" ShowIcon="true" Message="暂无友情链接。" />
+                }
+                else
+                {
+                    <div class="ucs-link-list">
+                        @foreach (var link in _friendLinks)
+                        {
+                            <div class="ucs-link-row">
+                                <Input @bind-Value="link.Name" Placeholder="名称" Disabled="!_canEdit" />
+                                <Input @bind-Value="link.Url" Placeholder="链接地址" Disabled="!_canEdit" />
+                                <Input @bind-Value="link.Description" Placeholder="描述（可选）" Disabled="!_canEdit" />
+                                <Input @bind-Value="link.LogoUrl" Placeholder="LOGO（可选）" Disabled="!_canEdit" />
+                                <PermissionGate Code="@PermissionCodes.SystemSettingUpdate">
+                                    <Button Danger="true" OnClick="@(() => _friendLinks.Remove(link))">移除</Button>
+                                </PermissionGate>
+                            </div>
+                        }
+                    </div>
+                }
+
+                <PermissionGate Code="@PermissionCodes.SystemSettingUpdate">
+                    <div class="ucs-form-actions">
+                        <Button Type="@ButtonType.Primary" OnClick="SaveFriendLinksAsync" Loading="_saving">保存友情链接</Button>
+                    </div>
+                </PermissionGate>
+            </Card>
+
+        </PermissionGate>
+
+        <PermissionGate Code="@PermissionCodes.SystemSettingRead" Inverse="true">
+            <Card Bordered="false">
+                <Alert Type="@AlertType.Info" ShowIcon="true"
+                       Message="当前账号没有查看系统设置的权限（需要 system-setting:read）。" />
+            </Card>
+        </PermissionGate>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private bool _loading;
+    private bool _saving;
+    private string? _error;
+    private string? _success;
+
+    private string _siteName = string.Empty;
+    private string _logoUrl = string.Empty;
+    private bool _allowLogin = true;
+    private bool _allowRegister = true;
+
+    private List<FriendLink> _friendLinks = new();
+
+    [Inject] private PermissionState Permissions { get; set; } = default!;
+
+    private bool _canEdit => Permissions.Has(PermissionCodes.SystemSettingUpdate);
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var info = await Api.GetAsync<SystemInfoResponse>("/api/system/info");
+            if (info.Success && info.Data is { } data)
+            {
+                _siteName = data.SiteName;
+                _logoUrl = data.LogoUrl ?? string.Empty;
+                _allowLogin = data.AllowLogin;
+                _allowRegister = data.AllowRegister;
+            }
+            else
+            {
+                _error = info.Message;
+            }
+
+            var links = await Api.GetAsync<FriendLinksResponse>("/api/system/friend-links");
+            if (links.Success && links.Data is { } linkData)
+            {
+                _friendLinks = linkData.Links.ToList();
+            }
+
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载系统设置失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void AddFriendLink()
+        => _friendLinks.Add(new FriendLink(string.Empty, string.Empty));
+
+    private async Task SaveSiteInfoAsync()
+    {
+        _saving = true;
+        _error = null;
+        _success = null;
+
+        try
+        {
+            var body = new
+            {
+                siteName = _siteName.Trim(),
+                logoUrl = _logoUrl.Trim(),
+                allowLogin = _allowLogin,
+                allowRegister = _allowRegister
+            };
+
+            var result = await Api.PutAsync<SystemInfoResponse>("/api/admin/system/info", body);
+            if (result.Success)
+            {
+                _success = "站点信息已保存。";
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task SaveFriendLinksAsync()
+    {
+        _saving = true;
+        _error = null;
+        _success = null;
+
+        try
+        {
+            var cleaned = _friendLinks
+                .Where(l => !string.IsNullOrWhiteSpace(l.Name) && !string.IsNullOrWhiteSpace(l.Url))
+                .ToList();
+
+            var result = await Api.PutAsync<FriendLinksResponse>("/api/admin/system/friend-links", new { links = cleaned });
+            if (result.Success)
+            {
+                _success = "友情链接已保存。";
+                await LoadAsync();
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+}

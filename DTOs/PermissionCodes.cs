@@ -12,12 +12,14 @@ public static class PermissionCodes
 
     // ============ 用户相关 ============
     public const string UserRead = "user:read";
+    public const string UserCreate = "user:create";
     public const string UserUpdate = "user:update";
     public const string UserDelete = "user:delete";
     public const string UserList = "user:list";
     public const string UserChangePassword = "user:change-password";
     public const string UserChangeEmail = "user:change-email";
     public const string UserLogout = "user:logout";
+    public const string UserResetPassword = "user:reset-password";
 
     // ============ 头像相关 ============
     public const string AvatarUpload = "avatar:upload";
@@ -50,6 +52,16 @@ public static class PermissionCodes
     public const string SystemSettingRead = "system-setting:read";
     public const string SystemSettingUpdate = "system-setting:update";
 
+    // ============ 邮件服务配置相关 ============
+    public const string SmtpRead = "smtp:read";
+    public const string SmtpUpdate = "smtp:update";
+
+    // ============ 子系统凭证相关 ============
+    public const string SubsystemRead = "subsystem:read";
+    public const string SubsystemCreate = "subsystem:create";
+    public const string SubsystemUpdate = "subsystem:update";
+    public const string SubsystemDelete = "subsystem:delete";
+
     // ============ B 权限覆盖的权限代码（权限管理 + 用户组管理）============
     public static readonly HashSet<string> BPermissionOverrides = new()
     {
@@ -69,4 +81,34 @@ public static class PermissionCodes
     public const string SuperAdminGroupName = "超级管理员";
     public const string AdminGroupName = "管理员";
     public const string NormalGroupName = "普通用户";
+
+    // ============ 权限组级别常量 ============
+
+    /// <summary>
+    /// 权限组级别：<strong>数值越小权限越高</strong>（0 为最高）。
+    /// <para>
+    /// 规则：操作者只能管理"最高权限组级别严格低于自己"的用户，
+    /// 即目标用户的最高级别必须<strong>数值大于</strong>操作者自己的级别。
+    /// </para>
+    /// </summary>
+    public static class GroupLevel
+    {
+        /// <summary>初始用户组：最高级别，不可修改。</summary>
+        public const int InitialUser = 0;
+
+        /// <summary>超级管理员。</summary>
+        public const int SuperAdmin = 2;
+
+        /// <summary>管理员。</summary>
+        public const int Admin = 10;
+
+        /// <summary>普通用户。</summary>
+        public const int NormalUser = 20;
+
+        /// <summary>新建权限组的默认级别（最低）。</summary>
+        public const int Default = 100;
+
+        /// <summary>不属于任何权限组时视为最低权限。</summary>
+        public const int NoGroup = int.MaxValue;
+    }
 }

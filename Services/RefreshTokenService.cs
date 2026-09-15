@@ -5,24 +5,6 @@ using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Services;
 
-public interface IRefreshTokenService
-{
-    /// <summary>
-    /// 为用户生成新的 Refresh Token（返回明文，数据库存哈希）
-    /// </summary>
-    Task<string> GenerateAsync(ulong userId);
-
-    /// <summary>
-    /// 验证 Refresh Token，成功返回用户，失败返回 null
-    /// </summary>
-    Task<User?> ValidateAsync(string refreshToken);
-
-    /// <summary>
-    /// 撤销用户的 Refresh Token
-    /// </summary>
-    Task RevokeAsync(ulong userId);
-}
-
 public class RefreshTokenService : IRefreshTokenService
 {
     private readonly ApplicationDbContext _context;
@@ -58,23 +40,33 @@ public class RefreshTokenService : IRefreshTokenService
             return null;
 
         var tokenHash = HashToken(refreshToken);
+        var now = DateTime.UtcNow;
 
-        var user = await _context.Users
-            .FirstOrDefaultAsync(u =>
+        // 先取出候选用户 Id（不追踪实体）
+        var userId = await _context.Users
+            .Where(u =>
                 u.RefreshToken == tokenHash &&
-                u.RefreshTokenExpiresAt > DateTime.UtcNow &&
-                u.Status == UserStatus.Normal);
+                u.RefreshTokenExpiresAt > now &&
+                u.Status == UserStatus.Normal)
+            .Select(u => (ulong?)u.Id)
+            .FirstOrDefaultAsync();
 
-        if (user == null)
+        if (userId == null)
             return null;
 
-        // 验证通过后立即清除旧 token，防止重放攻击
-        // 新的 refresh token 由调用方随后通过 GenerateAsync 生成
-        user.RefreshToken = null;
-        user.RefreshTokenExpiresAt = null;
-        await _context.SaveChangesAsync();
+        // 原子轮换：仅当数据库中的 token 仍是当前值时才清除。
+        // 并发刷新同一 token 时只有一个请求能成功（影响行数为 1），
+        // 其余请求得到 null，避免后写覆盖先写导致的新 token 静默失效。
+        var affected = await _context.Database.ExecuteSqlRawAsync(
+            "UPDATE users SET refresh_token = NULL, refresh_token_expires_at = NULL " +
+            "WHERE id = {0} AND refresh_token = {1}",
+            userId.Value, tokenHash);
 
-        return user;
+        if (affected == 0)
+            return null;
+
+        // 新的 refresh token 由调用方随后通过 GenerateAsync 生成
+        return await _context.Users.FindAsync(userId.Value);
     }
 
     public async Task RevokeAsync(ulong userId)

@@ -1,0 +1,562 @@
+@page "/user-groups"
+@attribute [Authorize]
+@implements IDisposable
+
+@inject UcsApiClient Api
+@inject PermissionState Permissions
+
+<PageTitle>权限组 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="权限组管理" OnRefresh="ReloadAsync" RefreshLoading="_loading">
+    <Actions>
+        <PermissionGate Code="@PermissionCodes.UserGroupCreate">
+            <Button Type="@ButtonType.Primary" OnClick="OpenCreate">新建权限组</Button>
+        </PermissionGate>
+    </Actions>
+
+    <ChildContent>
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+
+        <Card Bordered="false">
+            <Table TItem="UserGroupResponse"
+                   DataSource="_groups"
+                   Total="_totalCount"
+                   PageIndex="_page"
+                   PageIndexChanged="OnPageIndexChanged"
+                   PageSize="_pageSize"
+                   PageSizeChanged="OnPageSizeChanged"
+                   Loading="_loading"
+                   Bordered="false"
+                   Striped="true">
+                <PropertyColumn Title="ID" Property="c => c.Id" />
+                <PropertyColumn Title="级别" Property="c => c.Level" />
+                <PropertyColumn Title="名称" Property="c => c.Name" />
+                <PropertyColumn Title="描述" Property="c => c.Description" />
+                <Column TData="UserGroupResponse" Title="类型">
+                    @if (context.IsProtected)
+                    {
+                        <span class="ucs-chip is-gold">受保护</span>
+                    }
+                    @if (context.IsMemberLocked)
+                    {
+                        <span class="ucs-chip is-danger">成员锁定</span>
+                    }
+                    @if (context.IsDefaultForNewUsers)
+                    {
+                        <span class="ucs-chip is-success" title="新注册用户默认加入该权限组">基本用户权限</span>
+                    }
+                    @if (!context.IsProtected && !context.IsMemberLocked && !context.IsDefaultForNewUsers)
+                    {
+                        <span class="ucs-chip is-info">普通</span>
+                    }
+                </Column>
+                <PropertyColumn Title="成员数" Property="c => c.MemberCount" />
+                <PropertyColumn Title="权限数" Property="c => c.PermissionCount" />
+                <Column TData="UserGroupResponse" Title="操作">
+                    <Space>
+                        <PermissionGate Code="@PermissionCodes.UserGroupUpdate">
+                            <Button OnClick="@(() => OpenEdit(context))"
+                                    Disabled="@(!Permissions.CanManageGroup(context.Level))">编辑</Button>
+                        </PermissionGate>
+                        <PermissionGate Code="@PermissionCodes.UserGroupManageMembers">
+                            <Button OnClick="@(() => OpenMembersAsync(context))">成员</Button>
+                        </PermissionGate>
+                        <PermissionGate Code="@PermissionCodes.UserGroupManagePermissions">
+                            <Button OnClick="@(() => OpenPermissionsAsync(context))">权限</Button>
+                        </PermissionGate>
+                        <PermissionGate Code="@PermissionCodes.UserGroupDelete">
+                            <Popconfirm Title="@DeleteConfirmText(context)"
+                                        OnConfirm="@(_ => DeleteAsync(context))">
+                                <Button Danger="true"
+                                        Disabled="@(context.IsProtected || !Permissions.CanManageGroup(context.Level))">删除</Button>
+                            </Popconfirm>
+                        </PermissionGate>
+                    </Space>
+                </Column>
+            </Table>
+        </Card>
+
+        @* ============ 新建 / 编辑 ============ *@
+        <Modal Title="@(_editing is null ? "新建权限组" : "编辑权限组")"
+               Visible="_editVisible"
+               ConfirmLoading="_saving"
+               OnOk="@(_ => SaveGroupAsync())"
+               OnCancel="@(_ => _editVisible = false)"
+               DestroyOnClose="true">
+            <div class="ucs-form">
+                <div class="ucs-field">
+                    <label class="ucs-field-label">名称</label>
+                    <Input @bind-Value="_groupName" Placeholder="如：运营人员" />
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">描述</label>
+                    <Input @bind-Value="_groupDescription" Placeholder="可选" />
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">级别</label>
+                    <input class="ucs-native-input" type="number" @bind="_groupLevel" />
+                    <span class="ucs-field-hint">
+                        数值越小权限越高：0=初始用户，2=超级管理员，10=管理员，20=普通用户；只能设置低于自身的级别
+                    </span>
+                </div>
+                <div class="ucs-field">
+                    <Checkbox Checked="_groupIsDefaultForNewUsers"
+                              CheckedChanged="@(isChecked => _groupIsDefaultForNewUsers = isChecked)">
+                        基本用户权限
+                    </Checkbox>
+                    <span class="ucs-field-hint">
+                        开启后，新注册用户将默认拥有该权限组（可同时开启多个）
+                    </span>
+                </div>
+            </div>
+        </Modal>
+
+        @* ============ 成员管理 ============ *@
+        <Modal Title="@($"成员管理 · {_editing?.Name}")"
+               Visible="_membersVisible"
+               Footer="null"
+               Width="640"
+               OnCancel="@(_ => _membersVisible = false)"
+               DestroyOnClose="true">
+            @if (_detailLoading)
+            {
+                <div class="ucs-auth-loading"><Spin /></div>
+            }
+            else
+            {
+                <div class="ucs-form">
+                    <div class="ucs-filter-bar">
+                        <div class="ucs-filter-item">
+                            <span class="ucs-filter-label">添加成员（用户 ID）</span>
+                            <Input @bind-Value="_newMemberId" Placeholder="输入用户 ID" />
+                        </div>
+                        <div class="ucs-filter-actions">
+                            <Button Type="@ButtonType.Primary" OnClick="AddMemberAsync" Loading="_saving">添加</Button>
+                        </div>
+                    </div>
+                    <span class="ucs-field-hint">
+                        仅可管理权限级别低于自己的成员：不能添加或移除同级、更高级（含自己）的用户
+                    </span>
+
+                    @if (_members.Count == 0)
+                    {
+                        <Alert Type="@AlertType.Info" ShowIcon="true" Message="该权限组暂无成员。" />
+                    }
+                    else
+                    {
+                        <div class="ucs-member-list">
+                            @foreach (var member in _members)
+                            {
+                                <div class="ucs-member-item">
+                                    <span class="ucs-member-name">
+                                        <Avatar Icon="user" />
+                                        @member.Username
+                                        <span class="ucs-muted">#@member.UserId</span>
+                                    </span>
+                                    <span class="ucs-member-meta">@member.JoinedAt.ToLocalTime().ToString("yyyy-MM-dd")</span>
+                                    <Button Danger="true"
+                                            Disabled="@(!Permissions.CanManageGroup(member.PrivilegeLevel))"
+                                            OnClick="@(() => RemoveMemberAsync(member))">移除</Button>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        </Modal>
+
+        @* ============ 权限分配 ============ *@
+        <Modal Title="@($"权限分配 · {_editing?.Name}")"
+               Visible="_permissionsVisible"
+               ConfirmLoading="_saving"
+               Width="720"
+               OnOk="@(_ => SavePermissionsAsync())"
+               OnCancel="@(_ => _permissionsVisible = false)"
+               DestroyOnClose="true">
+            @if (_detailLoading)
+            {
+                <div class="ucs-auth-loading"><Spin /></div>
+            }
+            else
+            {
+                <div class="ucs-form">
+                    <Alert Type="@AlertType.Info" ShowIcon="true"
+                           Message="勾选后保存将整体替换该权限组的权限。特殊权限（PERM_A/B/C）受额外限制。" />
+
+                    <div class="ucs-perm-list">
+                        @foreach (var category in _permissionCategories)
+                        {
+                            <div class="ucs-perm-group">
+                                <div class="ucs-perm-group-title">@category.Key</div>
+                                @foreach (var permission in category.Value)
+                                {
+                                    <div class="ucs-perm-item">
+                                        <Checkbox Checked="_selectedPermissionIds.Contains(permission.Id)"
+                                                  CheckedChanged="@(isChecked => TogglePermission(permission.Id, isChecked))">
+                                            @permission.Name
+                                        </Checkbox>
+                                        <span class="ucs-perm-code">@permission.Code</span>
+                                        @if (permission.IsSpecial)
+                                        {
+                                            <span class="ucs-chip is-gold">特殊</span>
+                                        }
+                                        else if (permission.IsSystem)
+                                        {
+                                            <span class="ucs-chip is-default">内置</span>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        </Modal>
+
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private List<UserGroupResponse> _groups = new();
+    private int _totalCount;
+    private int _page = 1;
+    private int _pageSize = 20;
+    private bool _loading;
+    private bool _saving;
+    private bool _detailLoading;
+    private string? _error;
+
+    private UserGroupResponse? _editing;
+
+    private bool _editVisible;
+    private string _groupName = string.Empty;
+    private string _groupDescription = string.Empty;
+    private int _groupLevel = PermissionCodes.GroupLevel.Default;
+    private bool _groupIsDefaultForNewUsers;
+
+    private bool _membersVisible;
+    private List<GroupMemberResponse> _members = new();
+    private string _newMemberId = string.Empty;
+
+    private bool _permissionsVisible;
+    private Dictionary<string, List<PermissionResponse>> _permissionCategories = new();
+    private readonly HashSet<ulong> _selectedPermissionIds = new();
+
+
+    protected override void OnInitialized()
+    {
+        // 权限级别为异步就绪：若不订阅变更通知，首次进入时列表会以"未就绪"级别
+        // （NoGroup = int.MaxValue）渲染，导致所有操作按钮灰置且不会自动恢复
+        Permissions.Changed += OnPermissionsChanged;
+    }
+
+    private void OnPermissionsChanged() => _ = InvokeAsync(StateHasChanged);
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    public void Dispose() => Permissions.Changed -= OnPermissionsChanged;
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var result = await Api.GetPagedAsync<UserGroupResponse>($"/api/user-groups?page={_page}&pageSize={_pageSize}");
+            if (result.Success)
+            {
+                _groups = result.Items.ToList();
+                _totalCount = result.TotalCount;
+            }
+            else
+            {
+                _groups = new List<UserGroupResponse>();
+                _totalCount = 0;
+                _error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载权限组失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task ReloadAsync() => await LoadAsync();
+
+    private async Task OnPageIndexChanged(int page)
+    {
+        _page = page < 1 ? 1 : page;
+        await LoadAsync();
+    }
+
+    private async Task OnPageSizeChanged(int pageSize)
+    {
+        _pageSize = pageSize < 1 ? 20 : pageSize;
+        _page = 1;
+        await LoadAsync();
+    }
+
+    // ============ 新建 / 编辑 ============
+
+    private void OpenCreate()
+    {
+        _editing = null;
+        _groupName = string.Empty;
+        _groupDescription = string.Empty;
+        _groupLevel = PermissionCodes.GroupLevel.Default;
+        _groupIsDefaultForNewUsers = false;
+        _error = null;
+        _editVisible = true;
+    }
+
+    private void OpenEdit(UserGroupResponse group)
+    {
+        _editing = group;
+        _groupName = group.Name;
+        _groupDescription = group.Description ?? string.Empty;
+        _groupLevel = group.Level;
+        _groupIsDefaultForNewUsers = group.IsDefaultForNewUsers;
+        _error = null;
+        _editVisible = true;
+    }
+
+    private async Task SaveGroupAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_groupName))
+        {
+            _error = "权限组名称不能为空";
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            ApiResult<object> result;
+            var payload = new
+            {
+                name = _groupName.Trim(),
+                description = string.IsNullOrWhiteSpace(_groupDescription) ? null : _groupDescription.Trim(),
+                level = _groupLevel,
+                isDefaultForNewUsers = _groupIsDefaultForNewUsers
+            };
+
+            if (_editing is null)
+            {
+                result = await Api.PostAsync<object>("/api/user-groups", payload);
+            }
+            else
+            {
+                result = await Api.PutAsync<object>($"/api/user-groups/{_editing.Id}", payload);
+            }
+
+            if (result.Success)
+            {
+                _editVisible = false;
+                await LoadAsync();
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DeleteAsync(UserGroupResponse group)
+    {
+        var result = await Api.DeleteAsync<object>($"/api/user-groups/{group.Id}");
+        if (result.Success)
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            _error = result.Message;
+        }
+    }
+
+    // ============ 成员管理 ============
+
+    private async Task OpenMembersAsync(UserGroupResponse group)
+    {
+        _editing = group;
+        _membersVisible = true;
+        _newMemberId = string.Empty;
+        await LoadDetailAsync(group.Id);
+    }
+
+    private async Task LoadDetailAsync(ulong groupId)
+    {
+        _detailLoading = true;
+        _error = null;
+
+        try
+        {
+            var detail = await Api.GetAsync<UserGroupDetailResponse>($"/api/user-groups/{groupId}");
+            if (detail.Success && detail.Data is { } data)
+            {
+                _members = data.Members.ToList();
+            }
+            else
+            {
+                _members = new List<GroupMemberResponse>();
+                _error = detail.Message;
+            }
+        }
+        finally
+        {
+            _detailLoading = false;
+        }
+    }
+
+    private async Task AddMemberAsync()
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        if (!ulong.TryParse(_newMemberId?.Trim(), out var userId))
+        {
+            _error = "请输入合法的用户 ID（数字）";
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var result = await Api.PostAsync<object>($"/api/user-groups/{_editing.Id}/members", new { userId });
+            if (result.Success)
+            {
+                _newMemberId = string.Empty;
+                await LoadDetailAsync(_editing.Id);
+                await LoadAsync();
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task RemoveMemberAsync(GroupMemberResponse member)
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        var result = await Api.DeleteAsync<object>($"/api/user-groups/{_editing.Id}/members/{member.UserId}");
+        if (result.Success)
+        {
+            await LoadDetailAsync(_editing.Id);
+            await LoadAsync();
+        }
+        else
+        {
+            _error = result.Message;
+        }
+    }
+
+    // ============ 权限分配 ============
+
+    private async Task OpenPermissionsAsync(UserGroupResponse group)
+    {
+        _editing = group;
+        _permissionsVisible = true;
+        _selectedPermissionIds.Clear();
+        await LoadPermissionsAsync(group.Id);
+    }
+
+    private async Task LoadPermissionsAsync(ulong groupId)
+    {
+        _detailLoading = true;
+        _error = null;
+
+        try
+        {
+            var all = await Api.GetAsync<List<PermissionResponse>>("/api/permissions");
+            if (all.Success && all.Data is { } permissions)
+            {
+                _permissionCategories = permissions
+                    .GroupBy(p => p.Category)
+                    .ToDictionary(g => g.Key, g => g.OrderBy(p => p.Id).ToList());
+            }
+            else
+            {
+                _permissionCategories = new Dictionary<string, List<PermissionResponse>>();
+                _error = all.Message;
+            }
+
+            var detail = await Api.GetAsync<UserGroupDetailResponse>($"/api/user-groups/{groupId}");
+            if (detail.Success && detail.Data is { } data)
+            {
+                foreach (var permission in data.Permissions)
+                {
+                    _selectedPermissionIds.Add(permission.Id);
+                }
+            }
+        }
+        finally
+        {
+            _detailLoading = false;
+        }
+    }
+
+    private void TogglePermission(ulong permissionId, bool selected)
+    {
+        if (selected)
+        {
+            _selectedPermissionIds.Add(permissionId);
+        }
+        else
+        {
+            _selectedPermissionIds.Remove(permissionId);
+        }
+    }
+
+    private async Task SavePermissionsAsync()
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var body = new { permissionIds = _selectedPermissionIds.ToList() };
+            var result = await Api.PutAsync<object>($"/api/user-groups/{_editing.Id}/permissions", body);
+            if (result.Success)
+            {
+                _permissionsVisible = false;
+                await LoadAsync();
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // ============ 展示辅助 ============
+
+    private static string DeleteConfirmText(UserGroupResponse group)
+        => "确认删除权限组「" + group.Name + "」？该操作为物理删除。";
+}

@@ -1,46 +1,57 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using UserManagementSystem.Data;
+using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Services;
 
-/// <summary>
-/// JWT Token 黑名单服务，用于撤销已签发但尚未过期的 Token
-/// </summary>
-public interface ITokenBlacklistService
-{
-    /// <summary>
-    /// 将 Token 的 jti 加入黑名单
-    /// </summary>
-    /// <param name="jti">Token 的唯一标识</param>
-    /// <param name="expiresAt">Token 的过期时间，黑名单条目在此时间后自动清除</param>
-    void Blacklist(string jti, DateTime expiresAt);
-
-    /// <summary>
-    /// 检查 Token 的 jti 是否在黑名单中
-    /// </summary>
-    bool IsBlacklisted(string jti);
-}
-
 public class TokenBlacklistService : ITokenBlacklistService
 {
+    private readonly ApplicationDbContext _context;
     private readonly IMemoryCache _cache;
 
-    public TokenBlacklistService(IMemoryCache cache)
+    public TokenBlacklistService(ApplicationDbContext context, IMemoryCache cache)
     {
+        _context = context;
         _cache = cache;
     }
 
-    public void Blacklist(string jti, DateTime expiresAt)
+    public async Task BlacklistAsync(string jti, DateTime expiresAt)
     {
-        var remaining = expiresAt - DateTime.UtcNow;
-        if (remaining > TimeSpan.Zero)
+        if (expiresAt <= DateTime.UtcNow)
+            return; // Token 已自然过期，无需写入黑名单
+
+        var existing = await _context.RevokedTokens.FindAsync(jti);
+        if (existing == null)
         {
-            _cache.Set(GetKey(jti), true, remaining);
+            _context.RevokedTokens.Add(new RevokedToken { Jti = jti, ExpiresAt = expiresAt });
         }
+        else
+        {
+            existing.ExpiresAt = expiresAt;
+        }
+        await _context.SaveChangesAsync();
+
+        // 本实例命中缓存，避免后续重复查库
+        _cache.Set(GetKey(jti), true, expiresAt - DateTime.UtcNow);
     }
 
-    public bool IsBlacklisted(string jti)
+    public async Task<bool> IsBlacklistedAsync(string jti)
     {
-        return _cache.TryGetValue(GetKey(jti), out _);
+        var cacheKey = GetKey(jti);
+        if (_cache.TryGetValue(cacheKey, out bool cached) && cached)
+            return true;
+
+        var revoked = await _context.RevokedTokens
+            .AnyAsync(t => t.Jti == jti && t.ExpiresAt > DateTime.UtcNow);
+
+        // 只缓存肯定结果；否定结果不缓存，保证其他实例撤销后本实例能立即感知
+        if (revoked)
+        {
+            _cache.Set(cacheKey, true, TimeSpan.FromMinutes(5));
+        }
+
+        return revoked;
     }
 
     private static string GetKey(string jti) => $"token_blacklist_{jti}";

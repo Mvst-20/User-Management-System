@@ -1,0 +1,388 @@
+@page "/subsystems"
+@attribute [Authorize]
+
+@inject UcsApiClient Api
+
+<PageTitle>子系统 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="子系统管理" OnRefresh="LoadAsync" RefreshLoading="_loading">
+    <Actions>
+        <PermissionGate Code="@PermissionCodes.SubsystemCreate">
+            <Button Type="@ButtonType.Primary" OnClick="OpenCreate">登记子系统</Button>
+        </PermissionGate>
+    </Actions>
+
+    <ChildContent>
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+
+        @if (!string.IsNullOrWhiteSpace(_issuedSecret))
+        {
+            <Card Bordered="false">
+                <div class="ucs-block-head">
+                    <h2 class="ucs-block-title">新凭证（仅显示一次）</h2>
+                    <span class="ucs-chip is-warning">请立即保存</span>
+                </div>
+                <div class="ucs-form">
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">API Key</label>
+                        <Input Value="_issuedApiKey" Disabled="true" />
+                    </div>
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">API Secret</label>
+                        <Input Value="_issuedSecret" Disabled="true" />
+                    </div>
+                    <span class="ucs-field-hint">关闭提示后无法再次查看，如需更换请在列表中重新生成。</span>
+                    <div class="ucs-form-actions">
+                        <Button OnClick="DismissSecret">我已保存</Button>
+                    </div>
+                </div>
+            </Card>
+        }
+
+        <Card Bordered="false">
+            <Table TItem="SubsystemResponse"
+                   DataSource="_subsystems"
+                   Total="_totalCount"
+                   PageIndex="_page"
+                   PageIndexChanged="OnPageIndexChanged"
+                   PageSize="_pageSize"
+                   PageSizeChanged="OnPageSizeChanged"
+                   Loading="_loading"
+                   Bordered="false"
+                   Striped="true">
+                <PropertyColumn Title="名称" Property="c => c.Name" />
+                <PropertyColumn Title="标识" Property="c => c.Code" />
+                <Column TData="SubsystemResponse" Title="状态">
+                    @if (context.IsEnabled)
+                    {
+                        <span class="ucs-chip is-success">已启用</span>
+                    }
+                    else
+                    {
+                        <span class="ucs-chip is-danger">已停用</span>
+                    }
+                </Column>
+                <Column TData="SubsystemResponse" Title="API Key">
+                    <span class="ucs-mono">@context.ApiKey</span>
+                </Column>
+                <Column TData="SubsystemResponse" Title="最近使用">@FormatTime(context.LastUsedAt)</Column>
+                <Column TData="SubsystemResponse" Title="有效期">@FormatExpiry(context.ExpiresAt)</Column>
+                <Column TData="SubsystemResponse" Title="操作">
+                    <Space>
+                        <PermissionGate Code="@PermissionCodes.SubsystemUpdate">
+                            <Button OnClick="@(() => OpenEditAsync(context))">编辑</Button>
+                            <Button OnClick="@(() => ToggleStatusAsync(context))">
+                                @(context.IsEnabled ? "停用" : "启用")
+                            </Button>
+                            <Popconfirm Title="@RegenerateConfirmText(context)"
+                                        OnConfirm="@(_ => RegenerateAsync(context))">
+                                <Button>重置密钥</Button>
+                            </Popconfirm>
+                        </PermissionGate>
+                        <PermissionGate Code="@PermissionCodes.SubsystemDelete">
+                            <Popconfirm Title="@DeleteConfirmText(context)"
+                                        OnConfirm="@(_ => DeleteAsync(context))">
+                                <Button Danger="true">删除</Button>
+                            </Popconfirm>
+                        </PermissionGate>
+                    </Space>
+                </Column>
+            </Table>
+        </Card>
+
+        <Modal Title="@(_editing is null ? "登记子系统" : "编辑子系统")"
+               Visible="_editVisible"
+               ConfirmLoading="_saving"
+               OnOk="@(_ => SaveAsync())"
+               OnCancel="@(_ => _editVisible = false)"
+               DestroyOnClose="true">
+            <div class="ucs-form">
+                <div class="ucs-field">
+                    <label class="ucs-field-label">名称</label>
+                    <Input @bind-Value="_name" Placeholder="如：博客系统" />
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">标识</label>
+                    @if (_editing is null)
+                    {
+                        <Input @bind-Value="_code" Placeholder="英文短码，如 bwb" />
+                    }
+                    else
+                    {
+                        <Input Value="_editing.Code" Disabled="true" />
+                    }
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">描述</label>
+                    <Input @bind-Value="_description" Placeholder="可选" />
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">主页地址</label>
+                    <Input @bind-Value="_homeUrl" Placeholder="可选" />
+                </div>
+
+                @if (_editing is null)
+                {
+                    <div class="ucs-field">
+                        <span class="ucs-field-hint">
+                            权限码由子系统登记后凭 API 凭证自行注册（PUT /api/subsystems/self/permissions，
+                            强制以「标识:」为前缀），管理员无需代为声明。
+                        </span>
+                    </div>
+                }
+
+                <div class="ucs-field">
+                    <Checkbox Checked="_neverExpires"
+                              CheckedChanged="@(isChecked => _neverExpires = isChecked)">
+                        永不过期
+                    </Checkbox>
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">有效期</label>
+                    <input class="ucs-native-input" type="date" value="@_expiresDate"
+                           @onchange="OnExpiryDateChanged" disabled="@_neverExpires" />
+                    <span class="ucs-field-hint">有效期至所选日期当日结束；勾选「永不过期」后无需选择</span>
+                </div>
+            </div>
+        </Modal>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private List<SubsystemResponse> _subsystems = new();
+    private int _totalCount;
+    private int _page = 1;
+    private int _pageSize = 20;
+    private bool _loading;
+    private bool _saving;
+    private string? _error;
+
+    private SubsystemResponse? _editing;
+    private bool _editVisible;
+    private string _name = string.Empty;
+    private string _code = string.Empty;
+    private string _description = string.Empty;
+    private string _homeUrl = string.Empty;
+    private bool _neverExpires;
+    private string _expiresDate = DateTime.Today.ToString("yyyy-MM-dd");
+
+    private string _issuedApiKey = string.Empty;
+    private string _issuedSecret = string.Empty;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var result = await Api.GetPagedAsync<SubsystemResponse>($"/api/subsystems?page={_page}&pageSize={_pageSize}");
+            if (result.Success)
+            {
+                _subsystems = result.Items.ToList();
+                _totalCount = result.TotalCount;
+            }
+            else
+            {
+                _subsystems = new List<SubsystemResponse>();
+                _totalCount = 0;
+                _error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载子系统失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task OnPageIndexChanged(int page)
+    {
+        _page = page < 1 ? 1 : page;
+        await LoadAsync();
+    }
+
+    private async Task OnPageSizeChanged(int pageSize)
+    {
+        _pageSize = pageSize < 1 ? 20 : pageSize;
+        _page = 1;
+        await LoadAsync();
+    }
+
+    private void OpenCreate()
+    {
+        _editing = null;
+        _name = string.Empty;
+        _code = string.Empty;
+        _description = string.Empty;
+        _homeUrl = string.Empty;
+
+        // 默认长期有效（与"不填有效期"语义一致），日期默认今天，取消勾选后可直接选择
+        _neverExpires = true;
+        _expiresDate = DateTime.Today.ToString("yyyy-MM-dd");
+        _error = null;
+        _editVisible = true;
+    }
+
+    private Task OpenEditAsync(SubsystemResponse entry)
+    {
+        _editing = entry;
+        _name = entry.Name;
+        _description = entry.Description ?? string.Empty;
+        _homeUrl = entry.HomeUrl ?? string.Empty;
+
+        _neverExpires = entry.ExpiresAt is null;
+        _expiresDate = entry.ExpiresAt?.ToLocalTime().ToString("yyyy-MM-dd") ?? DateTime.Today.ToString("yyyy-MM-dd");
+        _error = null;
+        _editVisible = true;
+        return Task.CompletedTask;
+    }
+
+    private void OnExpiryDateChanged(ChangeEventArgs args)
+        => _expiresDate = args.Value?.ToString() ?? string.Empty;
+
+    /// <summary>
+    /// 解析有效期：永不过期返回 null；否则取所选日期的当日结束时间（本地 23:59:59 转 UTC）。
+    /// </summary>
+    private DateTime? ParseExpiresAt()
+    {
+        if (_neverExpires || !DateTime.TryParse(_expiresDate, out var local))
+        {
+            return null;
+        }
+
+        var endOfDay = local.Date.AddDays(1).AddSeconds(-1);
+        return DateTime.SpecifyKind(endOfDay, DateTimeKind.Local).ToUniversalTime();
+    }
+
+    private async Task SaveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_name) || (_editing is null && string.IsNullOrWhiteSpace(_code)))
+        {
+            _error = "请填写子系统名称与标识";
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            if (_editing is null)
+            {
+                var create = await Api.PostAsync<SubsystemCredentialResponse>("/api/subsystems", new
+                {
+                    name = _name.Trim(),
+                    code = _code.Trim(),
+                    description = string.IsNullOrWhiteSpace(_description) ? null : _description.Trim(),
+                    homeUrl = string.IsNullOrWhiteSpace(_homeUrl) ? null : _homeUrl.Trim(),
+                    expiresAt = ParseExpiresAt()
+                });
+
+                if (create.Success && create.Data is { } data)
+                {
+                    _editVisible = false;
+                    ShowIssuedSecret(data);
+                    await LoadAsync();
+                }
+                else
+                {
+                    _error = create.Message;
+                }
+            }
+            else
+            {
+                var update = await Api.PutAsync<SubsystemResponse>($"/api/subsystems/{_editing.Id}", new
+                {
+                    name = _name.Trim(),
+                    description = string.IsNullOrWhiteSpace(_description) ? null : _description.Trim(),
+                    homeUrl = string.IsNullOrWhiteSpace(_homeUrl) ? null : _homeUrl.Trim(),
+                    expiresAt = ParseExpiresAt()
+                });
+
+                if (update.Success)
+                {
+                    _editVisible = false;
+                    await LoadAsync();
+                }
+                else
+                {
+                    _error = update.Message;
+                }
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task ToggleStatusAsync(SubsystemResponse entry)
+    {
+        var result = await Api.PutAsync<SubsystemResponse>($"/api/subsystems/{entry.Id}/status",
+            new { isEnabled = !entry.IsEnabled });
+
+        if (result.Success)
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            _error = result.Message;
+        }
+    }
+
+    private async Task RegenerateAsync(SubsystemResponse entry)
+    {
+        var result = await Api.PostAsync<SubsystemCredentialResponse>($"/api/subsystems/{entry.Id}/regenerate-secret");
+        if (result.Success && result.Data is { } data)
+        {
+            ShowIssuedSecret(data);
+            await LoadAsync();
+        }
+        else
+        {
+            _error = result.Message;
+        }
+    }
+
+    private async Task DeleteAsync(SubsystemResponse entry)
+    {
+        var result = await Api.DeleteAsync<object>($"/api/subsystems/{entry.Id}");
+        if (result.Success)
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            _error = result.Message;
+        }
+    }
+
+    private void ShowIssuedSecret(SubsystemCredentialResponse data)
+    {
+        _issuedApiKey = data.Subsystem.ApiKey;
+        _issuedSecret = data.ApiSecret;
+    }
+
+    private void DismissSecret()
+    {
+        _issuedSecret = string.Empty;
+        _issuedApiKey = string.Empty;
+    }
+
+    private static string FormatTime(DateTime? value)
+        => value is null ? "-" : value.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+
+    private static string FormatExpiry(DateTime? value)
+        => value is null ? "长期有效" : value.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+
+    private static string RegenerateConfirmText(SubsystemResponse entry)
+        => "确认为「" + entry.Name + "」重新生成凭证？原凭证将立即失效。";
+
+    private static string DeleteConfirmText(SubsystemResponse entry)
+        => "确认删除子系统「" + entry.Name + "」？其凭证将立即失效。";
+}

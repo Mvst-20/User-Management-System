@@ -1,0 +1,42 @@
+@* UCS 管理控制台根组件：HTML 骨架 + 样式/脚本注册 *@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <title>UCS 管理控制台</title>
+    <link rel="stylesheet" href="_content/AntDesign/css/ant-design-blazor.css" />
+    <link rel="stylesheet" href="app.css" />
+    <HeadOutlet />
+</head>
+
+<body>
+    @* 关闭预渲染：认证状态需在首个渲染周期即可用（会话从加密 sessionStorage 恢复），
+       预渲染阶段无 JS 互操作会导致鉴权状态误判 *@
+    <Routes @rendermode="new InteractiveServerRenderMode(prerender: false)" />
+
+    @* 前端交互通道（SignalR circuit）未建立/中断时的显式提示。
+       由 blazor.web.js 按状态切换 components-reconnect-* 类名。 *@
+    <div id="components-reconnect-modal">
+        <div class="ucs-reconnect-box">
+            <p class="ucs-reconnect-title is-show">正在建立交互通道</p>
+            <p class="ucs-reconnect-text is-show">页面已加载，前端交互通道尚未就绪。</p>
+
+            <p class="ucs-reconnect-title is-failed">交互通道连接失败</p>
+            <p class="ucs-reconnect-text is-failed">
+                无法建立 /_blazor 连接，页面将无法响应操作。请检查反向代理是否允许 WebSocket（Upgrade / Connection 头）
+                或放行 Server-Sent Events 回退。
+            </p>
+            <div class="ucs-reconnect-actions is-failed">
+                <button class="ucs-reconnect-retry" type="button" onclick="location.reload()">重新加载</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="_content/AntDesign/js/ant-design-blazor.js"></script>
+    <script src="_framework/blazor.web.js"></script>
+</body>
+
+</html>

@@ -47,5 +47,14 @@ public class Permission
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// 归属的子系统：为空表示 UCS 自有权限或业务自定义权限。
+    /// 子系统被删除时置空（权限记录保留，降级为"自定义"）。
+    /// </summary>
+    [Column("subsystem_id")]
+    public ulong? SubsystemId { get; set; }
+
     public virtual User? Creator { get; set; }
+
+    public virtual Subsystem? Subsystem { get; set; }
 }

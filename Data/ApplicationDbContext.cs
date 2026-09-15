@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Data;
@@ -18,12 +19,17 @@ public class ApplicationDbContext : DbContext
     public DbSet<UserGroupPermission> UserGroupPermissions { get; set; }
     public DbSet<UserFollow> UserFollows { get; set; }
     public DbSet<SystemSetting> SystemSettings { get; set; }
+    public DbSet<RevokedToken> RevokedTokens { get; set; }
+    public DbSet<RateLimitEntry> RateLimitEntries { get; set; }
+    public DbSet<OnlineUser> OnlineUsers { get; set; }
+    public DbSet<SmtpConfig> SmtpConfigs { get; set; }
+    public DbSet<Subsystem> Subsystems { get; set; }
+    public DbSet<ServerMetric> ServerMetrics { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
-        // User entity configuration
         modelBuilder.Entity<User>(entity =>
         {
             entity.HasIndex(e => e.Username).IsUnique();
@@ -42,7 +48,6 @@ public class ApplicationDbContext : DbContext
                 .HasDefaultValue(false);
         });
 
-        // EmailVerificationToken entity configuration
         modelBuilder.Entity<EmailVerificationToken>(entity =>
         {
             entity.HasIndex(e => e.Token).IsUnique();
@@ -58,7 +63,6 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // Permission entity configuration
         modelBuilder.Entity<Permission>(entity =>
         {
             entity.HasIndex(e => e.Code).IsUnique();
@@ -73,15 +77,26 @@ public class ApplicationDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(e => e.CreatorId)
                 .OnDelete(DeleteBehavior.SetNull);
+
+            // 归属子系统：子系统删除时其注册的权限一并删除（级联），组授权记录由
+            // user_group_permissions.permission_id 的既有 Cascade 外键一并清理
+            entity.HasIndex(e => e.SubsystemId);
+
+            entity.HasOne(e => e.Subsystem)
+                .WithMany(s => s.Permissions)
+                .HasForeignKey(e => e.SubsystemId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // UserGroup entity configuration
         modelBuilder.Entity<UserGroup>(entity =>
         {
             entity.HasIndex(e => e.Name).IsUnique();
+
+            // 新建权限组默认为最低级别（数值越大权限越低），避免误建成高权限组
+            entity.Property(e => e.Level)
+                .HasDefaultValue(PermissionCodes.GroupLevel.Default);
         });
 
-        // UserGroupMember entity configuration
         modelBuilder.Entity<UserGroupMember>(entity =>
         {
             entity.HasIndex(e => new { e.UserId, e.GroupId }).IsUnique();
@@ -102,7 +117,6 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // UserGroupPermission entity configuration
         modelBuilder.Entity<UserGroupPermission>(entity =>
         {
             entity.HasIndex(e => new { e.GroupId, e.PermissionId }).IsUnique();
@@ -123,7 +137,6 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // UserFollow entity configuration
         modelBuilder.Entity<UserFollow>(entity =>
         {
             entity.HasIndex(e => new { e.FollowerId, e.FollowingId }).IsUnique();
@@ -145,12 +158,50 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // SystemSetting entity configuration
         modelBuilder.Entity<SystemSetting>(entity =>
         {
             entity.HasIndex(e => e.Key).IsUnique();
             entity.Property(e => e.UpdatedAt)
                 .HasColumnType("datetime");
+        });
+
+        modelBuilder.Entity<RevokedToken>(entity =>
+        {
+            entity.HasIndex(e => e.ExpiresAt);
+        });
+
+        modelBuilder.Entity<RateLimitEntry>(entity =>
+        {
+            entity.HasIndex(e => e.ExpiresAt);
+        });
+
+        modelBuilder.Entity<OnlineUser>(entity =>
+        {
+            entity.HasIndex(e => e.LastActiveAt);
+        });
+
+        // 单行配置表，主键固定为 1，不自增
+        modelBuilder.Entity<SmtpConfig>(entity =>
+        {
+            entity.Property(e => e.Id).ValueGeneratedNever();
+            entity.Property(e => e.UpdatedAt).HasColumnType("datetime");
+        });
+
+        modelBuilder.Entity<Subsystem>(entity =>
+        {
+            entity.HasIndex(e => e.Code).IsUnique();
+            entity.HasIndex(e => e.ApiKey).IsUnique();
+            entity.Property(e => e.CreatedAt).HasColumnType("datetime");
+            entity.Property(e => e.UpdatedAt).HasColumnType("datetime");
+            entity.Property(e => e.LastUsedAt).HasColumnType("datetime");
+            entity.Property(e => e.ExpiresAt).HasColumnType("datetime");
+        });
+
+        // 指标采样表：按采样时间查询，60s × 8 天 ≈ 1.2 万行
+        modelBuilder.Entity<ServerMetric>(entity =>
+        {
+            entity.HasIndex(e => e.RecordedAt);
+            entity.Property(e => e.RecordedAt).HasColumnType("datetime");
         });
     }
 }

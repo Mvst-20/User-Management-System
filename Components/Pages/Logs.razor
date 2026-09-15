@@ -1,0 +1,194 @@
+@page "/logs"
+@attribute [Authorize]
+@implements IDisposable
+
+@using UserManagementSystem.Logging
+@inject UcsApiClient Api
+@inject IJSRuntime JS
+
+<PageTitle>运行日志 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="运行日志" OnRefresh="ReloadAsync" RefreshLoading="_loading" FitViewport="true">
+
+    <ChildContent>
+    <PermissionGate Code="@PermissionCodes.AdminServer">
+        <div class="ucs-log-fit">
+        <Card Bordered="false">
+            <div class="ucs-block-head">
+                <div class="ucs-log-toolbar">
+                    <select class="ucs-native-select" @bind="_levelFilter" @bind:after="ReloadAsync">
+                        <option value="">全部级别</option>
+                        <option value="Debug">Debug</option>
+                        <option value="Information">Information</option>
+                        <option value="Warning">Warning</option>
+                        <option value="Error">Error</option>
+                        <option value="Fatal">Fatal</option>
+                    </select>
+                    <Checkbox Checked="_autoScroll"
+                              CheckedChanged="@(isChecked => _autoScroll = isChecked)">
+                        自动滚动到底部
+                    </Checkbox>
+                </div>
+                <span class="ucs-field-hint">@_entries.Count 条 · 缓冲区保留最近 2000 条（重启即清空）</span>
+            </div>
+
+            <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+
+            <div class="ucs-log-view">
+                @foreach (var entry in _entries)
+                {
+                    <div class="ucs-log-row is-@entry.Level.ToLowerInvariant()">
+                        <div class="ucs-log-line">
+                            <span class="ucs-log-time">@entry.Timestamp[11..]</span>
+                            <span class="ucs-log-level">@entry.Level</span>
+                            <span class="ucs-log-message">@entry.Message</span>
+                        </div>
+                        @if (entry.Exception is not null)
+                        {
+                            <pre class="ucs-log-exception">@entry.Exception</pre>
+                        }
+                    </div>
+                }
+
+                @if (_entries.Count == 0)
+                {
+                    <div class="ucs-log-empty">暂无日志</div>
+                }
+
+                <div id="ucs-log-bottom"></div>
+            </div>
+        </Card>
+        </div>
+    </PermissionGate>
+
+    <PermissionGate Code="@PermissionCodes.AdminServer" Inverse="true">
+        <Card Bordered="false">
+            <Alert Type="@AlertType.Info" ShowIcon="true"
+                   Message="当前账号没有查看运行日志的权限（需要 admin:server 或 PERM_C）。" />
+        </Card>
+    </PermissionGate>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(3);
+
+    private readonly List<RuntimeLogEntry> _entries = new();
+    private long _lastSequence;
+    private bool _autoScroll = true;
+    private bool _scrollPending;
+    private bool _loading;
+    private string _levelFilter = string.Empty;
+    private string? _error;
+    private CancellationTokenSource? _autoRefreshCts;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+        StartAutoRefresh();
+    }
+
+    private async Task ReloadAsync()
+    {
+        // 级别过滤变化或手动重载：从缓冲区尾部全量拉取
+        _entries.Clear();
+        _lastSequence = 0;
+        await FetchAsync();
+    }
+
+    private async Task FetchAsync()
+    {
+        _loading = true;
+        try
+        {
+            var url = $"/api/admin/logs?afterId={_lastSequence}&limit=500";
+            if (!string.IsNullOrWhiteSpace(_levelFilter))
+            {
+                url += $"&level={Uri.EscapeDataString(_levelFilter)}";
+            }
+
+            var result = await Api.GetAsync<RuntimeLogsData>(url);
+            if (result.Success && result.Data is { } data && data.Items.Count > 0)
+            {
+                _entries.AddRange(data.Items);
+                if (_entries.Count > 2000)
+                {
+                    _entries.RemoveRange(0, _entries.Count - 2000);
+                }
+
+                _lastSequence = data.LastSequence;
+                _error = null;
+                _scrollPending = _autoScroll;
+            }
+            else if (!result.Success)
+            {
+                _error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"拉取运行日志失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>
+    /// 渲染完成后再滚动：FetchAsync 更新数据时 DOM 尚未刷新，立即滚动会停在旧位置，
+    /// 这正是"自动滚动开关没有效果"的原因。
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_scrollPending)
+        {
+            _scrollPending = false;
+            await ScrollToBottomAsync();
+        }
+    }
+
+    private async Task ScrollToBottomAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("eval",
+                "document.getElementById('ucs-log-bottom')?.scrollIntoView({ block: 'end' })");
+        }
+        catch (JSDisconnectedException)
+        {
+            // 页面卸载：忽略
+        }
+    }
+
+    private void StartAutoRefresh()
+    {
+        _autoRefreshCts?.Cancel();
+        _autoRefreshCts?.Dispose();
+        _autoRefreshCts = new CancellationTokenSource();
+        _ = AutoRefreshLoopAsync(_autoRefreshCts.Token);
+    }
+
+    private async Task AutoRefreshLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(RefreshInterval, ct);
+                await InvokeAsync(() => FetchAsync());
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 页面卸载或手动暂停：正常结束
+        }
+    }
+
+    public void Dispose()
+    {
+        _autoRefreshCts?.Cancel();
+        _autoRefreshCts?.Dispose();
+    }
+}

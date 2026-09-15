@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using UserManagementSystem.Auth;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Extensions;
 using UserManagementSystem.Models;
@@ -18,7 +19,8 @@ public static class PermissionEndpoints
         {
             var permissions = await permissionService.GetCustomPermissionsAsync();
             var response = permissions.Select(p => new PermissionResponse(
-                p.Id, p.Code, p.Name, p.Category, p.IsSpecial, p.IsSystem, p.Description, p.CreatorId, p.CreatedAt
+                p.Id, p.Code, p.Name, p.Category, p.IsSpecial, p.IsSystem, p.Description, p.CreatorId, p.CreatedAt,
+                p.SubsystemId, p.Subsystem?.Name
             )).ToList();
 
             return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", response));
@@ -32,7 +34,8 @@ public static class PermissionEndpoints
         {
             var permissions = await permissionService.GetAllPermissionsAsync();
             var response = permissions.Select(p => new PermissionResponse(
-                p.Id, p.Code, p.Name, p.Category, p.IsSpecial, p.IsSystem, p.Description, p.CreatorId, p.CreatedAt
+                p.Id, p.Code, p.Name, p.Category, p.IsSpecial, p.IsSystem, p.Description, p.CreatorId, p.CreatedAt,
+                p.SubsystemId, p.Subsystem?.Name
             )).ToList();
 
             return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", response));
@@ -48,6 +51,13 @@ public static class PermissionEndpoints
         {
             var currentUserId = httpContext.User.GetUserId();
 
+            // 子系统凭证调用（无用户上下文）：凭证即授权，但必须显式指定要检查的用户
+            var isSubsystemCaller = httpContext.User.HasClaim(c => c.Type == SubsystemKeyAuthenticationHandler.SubsystemIdClaim);
+            if (isSubsystemCaller && !request.UserId.HasValue)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "子系统调用必须显式传入 userId"));
+            }
+
             // 确定要检查的用户 ID
             var targetUserId = request.UserId ?? currentUserId;
             if (!targetUserId.HasValue)
@@ -55,8 +65,8 @@ public static class PermissionEndpoints
                 return Results.Unauthorized();
             }
 
-            // 检查他人权限需要 permission:read 权限
-            if (request.UserId.HasValue && request.UserId.Value != currentUserId)
+            // 检查他人权限需要 permission:read 权限（子系统凭证已授权，跳过该内联校验）
+            if (!isSubsystemCaller && request.UserId.HasValue && request.UserId.Value != currentUserId)
             {
                 if (!currentUserId.HasValue || !await permissionService.HasPermissionAsync(currentUserId.Value, PermissionCodes.PermissionRead))
                 {
@@ -182,6 +192,12 @@ public static class PermissionEndpoints
             if (permission.IsSystem)
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.PermissionCannotModifySpecial, "系统内置权限不可删除"));
+            }
+
+            if (permission.SubsystemId is not null)
+            {
+                // 子系统注册的权限不可单独删除：移除途径是卸载对应子系统（级联删除）
+                return Results.BadRequest(new ApiResponse(ResultCodes.PermissionCannotModifySpecial, "子系统注册的权限不可单独删除，请卸载对应子系统"));
             }
 
             var deleted = await permissionService.DeletePermissionAsync(id);

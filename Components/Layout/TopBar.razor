@@ -1,0 +1,66 @@
+@* 顶部信息栏：左侧页面标题与操作区（来自 PageHeaderService），右侧当前用户与退出入口 *@
+@implements IDisposable
+@inject UcsApiClient Api
+@inject NavigationManager Navigation
+@inject PermissionState Permissions
+@inject PageHeaderService PageHeader
+
+<div class="ucs-topbar">
+    <div class="ucs-topbar-left">
+        <h1 class="ucs-topbar-title">@PageHeader.Title</h1>
+    </div>
+
+    <div class="ucs-topbar-right">
+        @if (PageHeader.Actions is not null)
+        {
+            <div class="ucs-page-actions">@PageHeader.Actions</div>
+        }
+        <AuthorizeView>
+            <Authorized>
+                <Dropdown Trigger="@(new[] { Trigger.Click })">
+                    <Overlay>
+                        <Menu>
+                            <MenuItem Key="my-permissions" RouterLink="/my-permissions">
+                                <UiIcon Name="shield-check" Size="14" />
+                                <span>我的权限</span>
+                            </MenuItem>
+                            <MenuItem Key="logout" OnClick="@(_ => LogoutAsync())">
+                                <UiIcon Name="log-out" Size="14" />
+                                <span>退出登录</span>
+                            </MenuItem>
+                        </Menu>
+                    </Overlay>
+                    <ChildContent>
+                        <span class="ucs-topbar-user">
+                            <UiIcon Name="user" Size="14" />
+                            <span class="ucs-topbar-username">@context.User.Identity?.Name</span>
+                            <UiIcon Name="chevron-down" Size="14" />
+                        </span>
+                    </ChildContent>
+                </Dropdown>
+            </Authorized>
+            <NotAuthorized>
+                <span class="ucs-topbar-username">未登录</span>
+            </NotAuthorized>
+        </AuthorizeView>
+    </div>
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        PageHeader.Changed += OnPageHeaderChanged;
+    }
+
+    /// <summary>页面标题/操作区变化时重渲染（页面在 OnParametersSet 中更新页头）。</summary>
+    private void OnPageHeaderChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private async Task LogoutAsync()
+    {
+        await Api.LogoutAsync();
+        Permissions.Clear();
+        Navigation.NavigateTo("/login", replace: true);
+    }
+
+    public void Dispose() => PageHeader.Changed -= OnPageHeaderChanged;
+}

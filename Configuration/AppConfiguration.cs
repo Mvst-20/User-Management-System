@@ -1,9 +1,16 @@
 namespace UserManagementSystem.Configuration;
 
+/// <summary>
+/// 应用级常量
+/// </summary>
+public static class AppInfo
+{
+    public const string Version = "v1.0.0";
+}
+
 public class AppConfiguration
 {
     public JwtConfig Jwt { get; set; } = new();
-    public SmtpConfig Smtp { get; set; } = new();
     public AppSettings AppSettings { get; set; } = new();
 }
 
@@ -15,21 +22,22 @@ public class JwtConfig
     public int ExpiryMinutes { get; set; } = 120;
 }
 
-public class SmtpConfig
-{
-    public string Host { get; set; } = string.Empty;
-    public int Port { get; set; } = 587;
-    public bool UseSsl { get; set; } = true;
-    public string Username { get; set; } = string.Empty;
-    public string Password { get; set; } = string.Empty;
-    public string From { get; set; } = string.Empty;
-    public string FromName { get; set; } = string.Empty;
-}
-
 public class AppSettings
 {
     public string ApiBaseUrl { get; set; } = string.Empty;
     public int TokenExpiryMinutes { get; set; } = 20;
     public int AdminPasswordLength { get; set; } = 12;
-    public string AllowedOrigins { get; set; } = string.Empty; // 逗号分隔的允许跨域来源，为空则允许所有
+    public string AllowedOrigins { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 管理前端回环调用本进程 REST API 的基地址。
+    /// 留空时自动从 ASPNETCORE_URLS/urls 推导，最终回落到 http://localhost:5000。
+    /// </summary>
+    public string SelfBaseUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Data Protection 密钥环持久化目录（SMTP 密码加密依赖该密钥环，丢失将无法解密）。
+    /// 相对路径基于应用工作目录；留空时使用 "keys"。
+    /// </summary>
+    public string DataProtectionKeysPath { get; set; } = string.Empty;
 }

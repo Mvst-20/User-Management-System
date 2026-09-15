@@ -32,10 +32,18 @@ public class UserGroup
     public bool IsMemberLocked { get; set; }
 
     /// <summary>
-    /// 自定义 JSON 扩展字段
+    /// 「基本用户权限」：为 true 时，新注册用户将默认加入该权限组。
+    /// 默认关闭（false）；允许同时有多个组开启。
     /// </summary>
-    [Column("extras", TypeName = "json")]
-    public string? Extras { get; set; }
+    [Column("is_default_for_new_users")]
+    public bool IsDefaultForNewUsers { get; set; }
+
+    /// <summary>
+    /// 权限组级别，<strong>数值越小权限越高</strong>（见 <see cref="DTOs.PermissionCodes.GroupLevel"/>）。
+    /// 用于判断操作者能否管理某个用户：目标用户的最高级别必须数值大于操作者自己的级别。
+    /// </summary>
+    [Column("level")]
+    public int Level { get; set; } = DTOs.PermissionCodes.GroupLevel.Default;
 
     public virtual ICollection<UserGroupMember> Members { get; set; } = new List<UserGroupMember>();
     public virtual ICollection<UserGroupPermission> GroupPermissions { get; set; } = new List<UserGroupPermission>();

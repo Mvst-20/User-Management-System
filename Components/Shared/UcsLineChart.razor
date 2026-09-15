@@ -1,0 +1,235 @@
+@* 通用 SVG 折线图：零第三方 JS、无鼠标事件回传（悬浮提示用 SVG 原生 title）。 *@
+@using System.Text
+<div class="ucs-line-chart">
+    @if (HasData)
+    {
+        <svg class="ucs-chart-svg" viewBox="0 0 600 @ViewBoxHeight" preserveAspectRatio="xMidYMid meet"
+             role="img" aria-label="@(AriaLabel ?? "折线图")">
+            @* Y 轴网格线与刻度（<text> 是 Razor 保留标签，文本元素经 RenderFragment 构建） *@
+            @for (var g = 0; g <= GridCount; g++)
+            {
+                var y = YForGrid(g);
+                <line class="ucs-chart-grid" x1="@PlotLeft" y1="@Num(y)" x2="@(ViewBoxWidth - PlotRight)" y2="@Num(y)" />
+            }
+            @YAxisLabels
+
+            @* 数据系列（显式指定颜色优先，否则按序号取调色板） *@
+            @for (var s = 0; s < Series.Count; s++)
+            {
+                var series = Series[s];
+                var color = series.Color ?? PaletteColor(s);
+                <path class="ucs-chart-line" d="@BuildPath(series)" style="stroke:@color" />
+
+                @* 点数不多时叠加圆点与原生悬浮提示，避免高密度图表 DOM 膨胀 *@
+                @if (series.Values.Count <= PointTitleLimit)
+                {
+                    @for (var i = 0; i < series.Values.Count; i++)
+                    {
+                        var index = i;
+                        var value = series.Values[index];
+                        if (value.HasValue)
+                        {
+                            <circle class="ucs-chart-dot" cx="@Num(X(index))" cy="@Num(Y(value.Value))"
+                                    r="2" fill="@color">
+                                <title>@PointTitle(series, index, value.Value)</title>
+                            </circle>
+                        }
+                    }
+                }
+            }
+
+            @* X 轴标签（最多取 6 个，均匀抽样） *@
+            @XAxisLabels
+        </svg>
+
+        @if (ShowLegend)
+        {
+            <div class="ucs-chart-legend">
+                @for (var s = 0; s < Series.Count; s++)
+                {
+                    var index = s;
+                    var legendColor = Series[index].Color ?? PaletteColor(index);
+                    <span class="ucs-chart-legend-item">
+                        <span class="ucs-chart-swatch" style="background:@legendColor"></span>
+                        <span>@Series[index].Name</span>
+                    </span>
+                }
+            </div>
+        }
+    }
+    else
+    {
+        <div class="ucs-chart-empty">暂无数据</div>
+    }
+</div>
+
+@code {
+    /// <summary>超过该点数则不再渲染单点圆点与 title（防止 DOM 膨胀）。</summary>
+    private const int PointTitleLimit = 120;
+
+    private const int ViewBoxWidth = 600;
+    private const int PlotLeft = 48;
+    private const int PlotRight = 14;
+    private const int PlotTop = 14;
+    private const int PlotBottom = 26;
+    private const int GridCount = 4;
+
+    /// <summary>系列取色（终端风：墨色主线 + 功能色辅助），与 app.css 的功能色板一致。</summary>
+    private static readonly string[] Palette = { "#111111", "#3B82F6", "#16A34A", "#D97706" };
+
+    [Parameter] public IReadOnlyList<string> Labels { get; set; } = Array.Empty<string>();
+    [Parameter] public IReadOnlyList<UcsLineSeries> Series { get; set; } = Array.Empty<UcsLineSeries>();
+
+    /// <summary>视口高度（px），宽度自适应容器并保持等比。</summary>
+    [Parameter] public int Height { get; set; } = 240;
+
+    /// <summary>手动指定 Y 轴上限；缺省时按数据取 1/2/2.5/5×10^n 的整值。</summary>
+    [Parameter] public double? YAxisMax { get; set; }
+
+    [Parameter] public bool ShowLegend { get; set; } = true;
+
+    /// <summary>刻度/悬浮提示的数值格式化（如内存 MB、带宽 Mbps）。</summary>
+    [Parameter] public Func<double, string>? ValueFormatter { get; set; }
+
+    [Parameter] public string? AriaLabel { get; set; }
+
+    private int ViewBoxHeight => Math.Max(120, Height);
+
+    private bool HasData =>
+        Series.Count > 0 &&
+        Series.Any(s => s.Values.Any(v => v.HasValue));
+
+    private string PaletteColor(int index) => Palette[index % Palette.Length];
+
+    private double PlotWidth => ViewBoxWidth - PlotLeft - PlotRight;
+    private double PlotHeight => ViewBoxHeight - PlotTop - PlotBottom;
+
+    private double MaxValue =>
+        Series.SelectMany(s => s.Values)
+              .Where(v => v.HasValue)
+              .Select(v => v!.Value)
+              .DefaultIfEmpty(1)
+              .Max();
+
+    /// <summary>Y 轴上限：优先手动值，否则取 1/2/2.5/5×10^n 的"好看"整数。</summary>
+    private double AxisMax
+    {
+        get
+        {
+            if (YAxisMax is > 0)
+            {
+                return YAxisMax.Value;
+            }
+
+            var raw = Math.Max(MaxValue, 0.0001);
+            var magnitude = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+            foreach (var multiple in new[] { 1d, 2d, 2.5d, 5d, 10d })
+            {
+                if (raw <= multiple * magnitude)
+                {
+                    return multiple * magnitude;
+                }
+            }
+
+            return 10 * magnitude;
+        }
+    }
+
+    private double X(int index) =>
+        Labels.Count <= 1
+            ? PlotLeft + PlotWidth / 2
+            : PlotLeft + index * (PlotWidth / (Labels.Count - 1));
+
+    private double Y(double value)
+    {
+        var ratio = Math.Clamp(value / AxisMax, 0, 1);
+        return PlotTop + (1 - ratio) * PlotHeight;
+    }
+
+    private double YForGrid(int g) => PlotTop + (1 - (double)g / GridCount) * PlotHeight;
+    private double ValueForGrid(int g) => AxisMax * g / GridCount;
+
+    /// <summary>拼接折线路径；null 点断开线段（M 重新起笔）。</summary>
+    private string BuildPath(UcsLineSeries series)
+    {
+        var builder = new StringBuilder();
+        var penDown = false;
+
+        for (var i = 0; i < series.Values.Count; i++)
+        {
+            var value = series.Values[i];
+            if (!value.HasValue)
+            {
+                penDown = false;
+                continue;
+            }
+
+            builder.Append(penDown ? "L" : "M")
+                   .Append(Num(X(i)))
+                   .Append(' ')
+                   .Append(Num(Y(value.Value)))
+                   .Append(' ');
+            penDown = true;
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private string PointTitle(UcsLineSeries series, int index, double value) =>
+        Labels.Count > index
+            ? $"{Labels[index]} · {series.Name}：{Format(value)}"
+            : $"{series.Name}：{Format(value)}";
+
+    /// <summary>X 轴标签抽样：最多 6 个、含首尾。</summary>
+    private IEnumerable<(int Index, string Text)> XLabelSlots()
+    {
+        if (Labels.Count == 0)
+        {
+            yield break;
+        }
+
+        var maxSlots = Math.Min(6, Labels.Count);
+        var step = Math.Max(1, (Labels.Count - 1) / Math.Max(1, maxSlots - 1));
+
+        for (var i = 0; i < Labels.Count; i += step)
+        {
+            yield return (i, Labels[i]);
+        }
+    }
+
+    private string Format(double value) =>
+        ValueFormatter?.Invoke(value) ?? value.ToString("0.##");
+
+    private string Num(double value) => value.ToString("0.##");
+
+    /// <summary>Y 轴刻度文本（RenderTreeBuilder 构建，绕开 Razor 对 &lt;text&gt; 的保留处理）。</summary>
+    private RenderFragment YAxisLabels => builder =>
+    {
+        for (var g = 0; g <= GridCount; g++)
+        {
+            builder.OpenElement(0, "text");
+            builder.AddAttribute(1, "class", "ucs-chart-ylabel");
+            builder.AddAttribute(2, "x", Num(PlotLeft - 8));
+            builder.AddAttribute(3, "y", Num(YForGrid(g) + 3.5));
+            builder.AddAttribute(4, "text-anchor", "end");
+            builder.AddContent(5, Format(ValueForGrid(g)));
+            builder.CloseElement();
+        }
+    };
+
+    /// <summary>X 轴标签文本。</summary>
+    private RenderFragment XAxisLabels => builder =>
+    {
+        var seq = 0;
+        foreach (var slot in XLabelSlots())
+        {
+            builder.OpenElement(seq++, "text");
+            builder.AddAttribute(seq++, "class", "ucs-chart-xlabel");
+            builder.AddAttribute(seq++, "x", Num(X(slot.Index)));
+            builder.AddAttribute(seq++, "y", Num(ViewBoxHeight - 8));
+            builder.AddAttribute(seq++, "text-anchor", "middle");
+            builder.AddContent(seq++, slot.Text);
+            builder.CloseElement();
+        }
+    };
+}

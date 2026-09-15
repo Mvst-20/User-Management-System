@@ -1,0 +1,83 @@
+@* 页面通知浮窗：fixed 定位于视图右上角，不参与页面布局；6 秒自动消失，可手动关闭 *@
+@implements IDisposable
+
+@if (!string.IsNullOrWhiteSpace(Message) && !_dismissed)
+{
+    <div class="ucs-notice is-@Kind @PlacementClass" role="alert">
+        <span class="ucs-notice-icon"><UiIcon Name="@IconName" /></span>
+        <span class="ucs-notice-text">@Message</span>
+        <button class="ucs-notice-close" type="button" @onclick="Dismiss" aria-label="关闭">×</button>
+    </div>
+}
+
+@code {
+    /// <summary>自动消失时长（秒）。</summary>
+    private const int AutoCloseSeconds = 6;
+
+    /// <summary>通知内容；为空时浮窗不渲染。</summary>
+    [Parameter] public string? Message { get; set; }
+
+    /// <summary>级别：error / warning / info / success（决定左侧色条与图标）。</summary>
+    [Parameter] public string Kind { get; set; } = "error";
+
+    /// <summary>
+    /// 定位方式：top-right（默认，固定于视口右上角）或 anchor（绝对定位于最近的
+    /// position:relative 祖先内部，用于登录卡片等就地浮动提示）。
+    /// </summary>
+    [Parameter] public string Placement { get; set; } = "top-right";
+
+    private string PlacementClass => Placement == "anchor" ? "is-anchor" : string.Empty;
+
+    /// <summary>关闭（手动或超时）后回调，父页面借此清除消息源（如 _error = null）。</summary>
+    [Parameter] public EventCallback OnDismiss { get; set; }
+
+    private bool _dismissed;
+    private string? _lastMessage;
+    private Timer? _autoCloseTimer;
+
+    private string IconName => Kind switch
+    {
+        "warning" => "alert-triangle",
+        "info" => "info",
+        "success" => "check-circle",
+        _ => "alert-circle"
+    };
+
+    protected override void OnParametersSet()
+    {
+        if (string.Equals(Message, _lastMessage, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastMessage = Message;
+        _dismissed = string.IsNullOrWhiteSpace(Message);
+        RestartTimer();
+    }
+
+    private void RestartTimer()
+    {
+        _autoCloseTimer?.Dispose();
+        _autoCloseTimer = null;
+
+        if (!_dismissed)
+        {
+            _autoCloseTimer = new Timer(
+                _ => _ = InvokeAsync(Dismiss),
+                null,
+                AutoCloseSeconds * 1000,
+                Timeout.Infinite);
+        }
+    }
+
+    private void Dismiss()
+    {
+        _dismissed = true;
+        _autoCloseTimer?.Dispose();
+        _autoCloseTimer = null;
+        StateHasChanged();
+        _ = OnDismiss.InvokeAsync();
+    }
+
+    public void Dispose() => _autoCloseTimer?.Dispose();
+}

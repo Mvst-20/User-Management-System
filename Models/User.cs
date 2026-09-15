@@ -85,6 +85,12 @@ public class User
     [Column("is_following_list_hidden")]
     public bool IsFollowingListHidden { get; set; } = false;
 
+    /// <summary>
+    /// 注销（软删除）时间；用于统计"注销用户"逐日趋势。恢复为非删除状态时清空。
+    /// </summary>
+    [Column("deleted_at")]
+    public DateTime? DeletedAt { get; set; }
+
     public virtual ICollection<EmailVerificationToken> VerificationTokens { get; set; } = new List<EmailVerificationToken>();
 
     // 关注关系导航属性

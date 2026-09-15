@@ -1,0 +1,29 @@
+@* 路由表：AuthorizeRouteView 统一处理未授权跳转 *@
+@inject NavigationManager Navigation
+
+<Router AppAssembly="typeof(Program).Assembly">
+    <Found Context="routeData">
+        <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(MainLayout)">
+            <NotAuthorized>
+                <RedirectToLogin />
+            </NotAuthorized>
+            <Authorizing>
+                <div class="ucs-auth-loading">
+                    <Spin />
+                </div>
+            </Authorizing>
+        </AuthorizeRouteView>
+        <FocusOnNavigate RouteData="routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="typeof(MainLayout)">
+            <div class="ucs-empty-state">
+                <div class="ucs-empty-code">404</div>
+                <h2 class="ucs-empty-title">抱歉，你访问的页面不存在</h2>
+                <Button Type="@ButtonType.Primary" OnClick="@(() => Navigation.NavigateTo("/"))">
+                    返回仪表盘
+                </Button>
+            </div>
+        </LayoutView>
+    </NotFound>
+</Router>

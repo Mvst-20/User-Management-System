@@ -1,0 +1,21 @@
+@* 图标组件：渲染 Lucide 开源图标包（https://lucide.dev，ISC License）的官方路径数据。
+   数据见 UiIconData，本组件不绘制任何图形，颜色继承 currentColor。 *@
+
+<svg class="ucs-icon" xmlns="http://www.w3.org/2000/svg" width="@Size" height="@Size"
+     viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="@StrokeWidth"
+     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    @((MarkupString)Markup)
+</svg>
+
+@code {
+    /// <summary>Lucide 官方图标名（kebab-case）。</summary>
+    [Parameter, EditorRequired] public string Name { get; set; } = string.Empty;
+
+    /// <summary>边长（px）。</summary>
+    [Parameter] public int Size { get; set; } = 16;
+
+    /// <summary>描边宽度；工业化冷淡风格默认使用细描边。</summary>
+    [Parameter] public double StrokeWidth { get; set; } = 1.6;
+
+    private string Markup => UiIconData.Get(Name);
+}

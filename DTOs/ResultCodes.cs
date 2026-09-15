@@ -19,7 +19,6 @@ public static class ResultCodes
     public const int RegisterSuccess = 100;          // 注册成功
     public const int RegisterFail_UsernameExists = 101;     // 用户名已存在
     public const int RegisterFail_EmailExists = 102;        // 邮箱已被注册
-    public const int RegisterFail_PhoneExists = 103;        // 手机号已被使用
 
     // ============ 登录相关 (2xx) ============
     public const int LoginSuccess = 200;             // 登录成功
@@ -35,7 +34,6 @@ public static class ResultCodes
     public const int EmailVerifyFail_InvalidToken = 301;    // 无效的验证链接
     public const int EmailVerifyFail_TokenExpired = 302;     // 验证链接已过期
     public const int EmailVerifyFail_InvalidType = 303;      // 无效的验证类型
-    public const int EmailVerifyFail_UserNotFound = 304;     // 用户不存在
     public const int ResendVerificationSuccess = 310;      // 验证邮件已发送
     public const int ResendVerificationFail_RateLimited = 311;  // 请求过于频繁
     public const int ResendVerificationFail_UserNotFound = 312; // 用户不存在
@@ -65,6 +63,8 @@ public static class ResultCodes
     public const int UpdateUserFail_UsernameExists = 613;    // 用户名已存在
     public const int UpdateUserFail_EmailExists = 614;      // 邮箱已被使用
     public const int UpdateUserFail_PhoneExists = 615;      // 手机号已被使用
+    public const int UpdateUserFail_StatusRestricted = 616; // 状态仅可由管理员修改，或状态值不合法
+    public const int UpdateUserFail_PrivilegeLevel = 617;   // 目标用户权限级别不低于操作者，拒绝操作
     public const int DeleteUserSuccess = 620;          // 删除用户成功
     public const int DeleteUserFail_NotFound = 621;    // 用户不存在
     public const int DeleteUserFail_Forbidden = 622;   // 禁止删除（系统用户）
@@ -75,9 +75,7 @@ public static class ResultCodes
     public const int UploadAvatarSuccess = 700;        // 上传头像成功
     public const int UploadAvatarFail_InvalidType = 701;    // 不支持的图片格式
     public const int UploadAvatarFail_FileTooLarge = 702;   // 图片大小超过限制
-    public const int UploadAvatarFail_Forbidden = 703;     // 禁止上传
     public const int DeleteAvatarSuccess = 710;        // 删除头像成功
-    public const int DeleteAvatarFail_NotFound = 711;  // 头像不存在
 
     // ============ 管理员相关 (8xx) ============
     public const int AdminStatsSuccess = 800;          // 获取统计成功
@@ -108,8 +106,12 @@ public static class ResultCodes
     public const int UserGroupMemberAddSuccess = 1122;         // 添加成员成功
     public const int UserGroupMemberRemoveSuccess = 1123;      // 移除成员成功
     public const int UserGroupMemberLocked = 1124;             // 用户组成员锁定，不可修改
+    public const int UserGroupLockedGroupNotAssignable = 1125; // 受保护权限组不可分配
     public const int UserGroupPermissionSetSuccess = 1130;     // 设置权限成功
     public const int PermissionAPermissionRestricted = 1131;   // A权限不可分配给非初始用户组
     public const int PermissionCheckSuccess = 1150;            // 权限检查完成
-    public const int UserGroupExtrasUpdateSuccess = 1160;      // 用户组扩展字段更新成功
+
+    // ============ 子系统自注册权限 (12xx) ============
+    public const int SubsystemPermissionSyncSuccess = 1200;    // 子系统权限自注册同步成功
+    public const int SubsystemPermissionConflict = 1201;       // 权限码冲突（归属他方或格式非法），整体拒绝
 }

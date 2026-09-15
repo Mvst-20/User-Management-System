@@ -1,0 +1,349 @@
+@page "/server"
+@attribute [Authorize]
+@implements IDisposable
+
+@inject UcsApiClient Api
+
+<PageTitle>服务器状态 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="服务器状态" OnRefresh="LoadAsync" RefreshLoading="_loading">
+
+    <ChildContent>
+    <PermissionGate Code="@PermissionCodes.AdminServer">
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+
+        @if (_status is null)
+        {
+            <Card Bordered="false">
+                <div class="ucs-auth-loading"><Spin /></div>
+            </Card>
+        }
+        else
+        {
+            <div class="ucs-stat-grid is-three">
+                <div class="ucs-stat-card">
+                    <div class="ucs-stat-body">
+                        <div class="ucs-stat-label">运行时长</div>
+                        <div class="ucs-stat-value is-text">@_status.Uptime</div>
+                        <div class="ucs-stat-hint">版本 @_status.Version</div>
+                    </div>
+                </div>
+
+                <div class="ucs-stat-card">
+                    <div class="ucs-stat-body">
+                        <div class="ucs-stat-label">数据库</div>
+                        <div class="ucs-stat-value is-text @(IsDatabaseHealthy ? "is-ok" : "is-bad")">
+                            @(IsDatabaseHealthy ? "连接正常" : "连接异常")
+                        </div>
+                        <div class="ucs-stat-hint">@_status.DatabaseStatus</div>
+                    </div>
+                </div>
+
+                <div class="ucs-stat-card">
+                    <div class="ucs-stat-body">
+                        <div class="ucs-stat-label">采样时间</div>
+                        <div class="ucs-stat-value is-text">@DisplayUpdateTime</div>
+                        <div class="ucs-stat-hint">自动刷新 10s</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="ucs-metric-grid">
+                <Card Bordered="false">
+                    <div class="ucs-metric">
+                        <div class="ucs-metric-head">
+                            <span class="ucs-metric-name">CPU 使用率</span>
+                            <span class="ucs-metric-value">@_status.CpuUsage.ToString("0.0")%</span>
+                        </div>
+                        <div class="ucs-bar">
+                            <div class="ucs-bar-inner is-primary"
+                                 style="@($"width: {ClampPercent(_status.CpuUsage):0.#}%")"></div>
+                        </div>
+                    </div>
+                </Card>
+
+                <Card Bordered="false">
+                    <div class="ucs-metric">
+                        <div class="ucs-metric-head">
+                            <span class="ucs-metric-name">内存占用</span>
+                            <span class="ucs-metric-value">@_status.MemoryUsage.ToString("0.0")%</span>
+                        </div>
+                        <div class="ucs-bar">
+                            <div class="ucs-bar-inner is-success"
+                                 style="@($"width: {ClampPercent(_status.MemoryUsage):0.#}%")"></div>
+                        </div>
+                        <div class="ucs-metric-foot">
+                            @FormatBytes(_status.MemoryUsedBytes) / @FormatBytes(_status.MemoryTotalBytes)
+                        </div>
+                    </div>
+                </Card>
+
+                <Card Bordered="false">
+                    <div class="ucs-metric">
+                        <div class="ucs-metric-head">
+                            <span class="ucs-metric-name">网络发送</span>
+                            <span class="ucs-metric-value">@FormatRate(_status.NetworkSendRate)</span>
+                        </div>
+                        <div class="ucs-metric-foot">累计 @FormatBytes(_status.NetworkBytesSent)</div>
+                    </div>
+                </Card>
+
+                <Card Bordered="false">
+                    <div class="ucs-metric">
+                        <div class="ucs-metric-head">
+                            <span class="ucs-metric-name">网络接收</span>
+                            <span class="ucs-metric-value">@FormatRate(_status.NetworkReceiveRate)</span>
+                        </div>
+                        <div class="ucs-metric-foot">累计 @FormatBytes(_status.NetworkBytesReceived)</div>
+                    </div>
+                </Card>
+            </div>
+
+            <Card Bordered="false">
+                <div class="ucs-block-head">
+                    <h2 class="ucs-block-title">历史趋势</h2>
+                    <div class="ucs-btn-group">
+                        @foreach (var option in HoursOptions)
+                        {
+                            <Button Type="@(_metricsHours == option ? ButtonType.Primary : ButtonType.Default)"
+                                    OnClick="@(() => ChangeHoursAsync(option))">
+                                @HoursLabel(option)
+                            </Button>
+                        }
+                    </div>
+                </div>
+
+                @if (_metricsLoading)
+                {
+                    <div class="ucs-auth-loading"><Spin /></div>
+                }
+                else if (_metricsData is { } metrics && metrics.Items.Count > 0)
+                {
+                    <div class="ucs-trend-grid">
+                        <div class="ucs-trend-item">
+                            <div class="ucs-trend-title">CPU 使用率（%）</div>
+                            <UcsLineChart Labels="@_metricsLabels"
+                                          Series="@CpuSeries"
+                                          Height="180" YAxisMax="100"
+                                          ValueFormatter="@((v) => $"{v:0.#}%")" />
+                        </div>
+
+                        <div class="ucs-trend-item">
+                            <div class="ucs-trend-title">内存占用（%）</div>
+                            <UcsLineChart Labels="@_metricsLabels"
+                                          Series="@MemorySeries"
+                                          Height="180" YAxisMax="100"
+                                          ValueFormatter="@((v) => $"{v:0.#}%")" />
+                        </div>
+
+                        <div class="ucs-trend-item">
+                            <div class="ucs-trend-title">网络带宽</div>
+                            <UcsLineChart Labels="@_metricsLabels"
+                                          Series="@NetworkSeries"
+                                          Height="180"
+                                          ValueFormatter="FormatRateForChart" />
+                        </div>
+                    </div>
+                    <div class="ucs-chart-footnote">采样间隔 60s，按 @metrics.BucketMinutes 分钟分桶取均值；数据保留 8 天</div>
+                }
+                else
+                {
+                    <Alert Type="@AlertType.Info" ShowIcon="true"
+                           Message="暂无历史数据。指标采集服务每 60s 记录一次，启动后约 1 分钟可见首批数据。" />
+                }
+            </Card>
+        }
+    </PermissionGate>
+
+    <PermissionGate Code="@PermissionCodes.AdminServer" Inverse="true">
+        <Card Bordered="false">
+            <Alert Type="@AlertType.Info" ShowIcon="true"
+                   Message="当前账号没有查看服务器状态的权限（需要 admin:server 或 PERM_C）。" />
+        </Card>
+    </PermissionGate>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(10);
+
+    /// <summary>历史趋势可选时间范围（小时）：6h / 24h / 3d / 7d。</summary>
+    private static readonly int[] HoursOptions = { 6, 24, 72, 168 };
+
+    private ServerStatusResponse? _status;
+    private CancellationTokenSource? _autoRefreshCts;
+    private bool _loading;
+    private string? _error;
+    private DateTime? _lastUpdatedUtc;
+
+    private int _metricsHours = 24;
+    private ServerMetricsData? _metricsData;
+    private bool _metricsLoading;
+    private string[] _metricsLabels = Array.Empty<string>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        await LoadMetricsAsync();
+        StartAutoRefresh();
+    }
+
+    // ============ 历史趋势 ============
+
+    private double?[] CpuValues =>
+        _metricsData?.Items.Select(p => (double?)p.CpuUsage).ToArray() ?? Array.Empty<double?>();
+
+    private double?[] MemoryValues =>
+        _metricsData?.Items.Select(p => (double?)p.MemoryUsage).ToArray() ?? Array.Empty<double?>();
+
+    private double?[] NetworkInValues =>
+        _metricsData?.Items.Select(p => (double?)p.NetworkInBps).ToArray() ?? Array.Empty<double?>();
+
+    private double?[] NetworkOutValues =>
+        _metricsData?.Items.Select(p => (double?)p.NetworkOutBps).ToArray() ?? Array.Empty<double?>();
+
+    private IReadOnlyList<UcsLineSeries> CpuSeries =>
+        new List<UcsLineSeries> { new("CPU", CpuValues) };
+
+    private IReadOnlyList<UcsLineSeries> MemorySeries =>
+        new List<UcsLineSeries> { new("内存", MemoryValues) };
+
+    private IReadOnlyList<UcsLineSeries> NetworkSeries =>
+        new List<UcsLineSeries> { new("下行", NetworkInValues), new("上行", NetworkOutValues) };
+
+    private async Task LoadMetricsAsync()
+    {
+        _metricsLoading = true;
+        try
+        {
+            var result = await Api.GetAsync<ServerMetricsData>($"/api/admin/server/metrics?hours={_metricsHours}");
+            if (result.Success && result.Data is { } data)
+            {
+                _metricsData = data;
+                _metricsLabels = data.Items.Select(p => p.Time).ToArray();
+            }
+            else
+            {
+                _metricsData = null;
+            }
+        }
+        catch
+        {
+            _metricsData = null;
+        }
+        finally
+        {
+            _metricsLoading = false;
+        }
+    }
+
+    private async Task ChangeHoursAsync(int hours)
+    {
+        if (_metricsHours == hours)
+        {
+            return;
+        }
+
+        _metricsHours = hours;
+        await LoadMetricsAsync();
+    }
+
+    private static string HoursLabel(int hours) => hours switch
+    {
+        6 => "近 6 小时",
+        24 => "近 24 小时",
+        72 => "近 3 天",
+        _ => "近 7 天"
+    };
+
+    private static string FormatRateForChart(double bytesPerSecond) => $"{FormatBytes((long)bytesPerSecond)}/s";
+
+    private bool IsDatabaseHealthy =>
+        _status is not null && _status.DatabaseStatus.StartsWith("Connected", StringComparison.OrdinalIgnoreCase);
+
+    private string DisplayUpdateTime =>
+        _lastUpdatedUtc is null ? "-" : _lastUpdatedUtc.Value.ToLocalTime().ToString("HH:mm:ss");
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            var result = await Api.GetAsync<ServerStatusResponse>("/api/admin/server/status");
+            if (result.Success && result.Data is { } data)
+            {
+                _status = data;
+                _lastUpdatedUtc = DateTime.UtcNow;
+                _error = null;
+            }
+            else
+            {
+                _error = result.Message;
+            }
+
+            // 手动刷新与自动轮询共用本方法：实时卡片区每 10s 更新，
+            // 历史趋势数据（60s 采样）无需如此频繁，仅在这里顺带轻量同步一次即可
+            if (!_metricsLoading)
+            {
+                await LoadMetricsAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"获取服务器状态失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void StartAutoRefresh()
+    {
+        _autoRefreshCts?.Cancel();
+        _autoRefreshCts?.Dispose();
+        _autoRefreshCts = new CancellationTokenSource();
+        _ = AutoRefreshLoopAsync(_autoRefreshCts.Token);
+    }
+
+    private async Task AutoRefreshLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(RefreshInterval, ct);
+                await InvokeAsync(() => LoadAsync());
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 页面卸载或手动暂停：正常结束
+        }
+    }
+
+    private static double ClampPercent(double value) => Math.Clamp(value, 0, 100);
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double size = bytes;
+        var unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+
+        return $"{size:0.##} {units[unit]}";
+    }
+
+    private static string FormatRate(double bytesPerSecond) => $"{FormatBytes((long)bytesPerSecond)}/s";
+
+    public void Dispose()
+    {
+        _autoRefreshCts?.Cancel();
+        _autoRefreshCts?.Dispose();
+    }
+}

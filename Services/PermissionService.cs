@@ -21,6 +21,150 @@ public class PermissionService : IPermissionService
         _logger = logger;
     }
 
+    // ============ 权限归属（子系统自注册）============
+
+    /// <summary>权限码长度上限（与 permissions.code 列宽一致）。</summary>
+    private const int PermissionCodeMaxLength = 64;
+
+    public async Task<SubsystemPermissionSyncResult> SyncSubsystemPermissionsAsync(
+        ulong subsystemId, string subsystemCode, List<SubsystemPermissionItem>? items)
+    {
+        // 归一化：去空白、去重（重复声明以首条为准）
+        var wantedItems = (items ?? new List<SubsystemPermissionItem>())
+            .Where(item => item is not null && !string.IsNullOrWhiteSpace(item.Code))
+            .GroupBy(item => item.Code.Trim(), StringComparer.Ordinal)
+            .Select(group => group.First() with { Code = group.Key })
+            .ToList();
+
+        var conflicts = new List<string>();
+
+        // 前缀 + 格式校验：权限码必须以「{子系统code}:」开头，防伪造与抢占他方权限
+        var prefix = subsystemCode.Trim() + ":";
+        var wanted = new List<string>(wantedItems.Count);
+        foreach (var item in wantedItems)
+        {
+            if (!item.Code.StartsWith(prefix, StringComparison.Ordinal) ||
+                item.Code.Length > PermissionCodeMaxLength ||
+                item.Code.Any(ch => ch != ':' && ch != '_' && ch != '-'
+                    && (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9')))
+            {
+                conflicts.Add(item.Code);
+            }
+            else
+            {
+                wanted.Add(item.Code);
+            }
+        }
+
+        var owned = await _context.Permissions
+            .Where(p => p.SubsystemId == subsystemId)
+            .ToListAsync();
+        var ownedByCode = owned.ToDictionary(p => p.Code, StringComparer.Ordinal);
+
+        var touchedCodes = wanted.Union(ownedByCode.Keys, StringComparer.Ordinal).ToList();
+        var existing = touchedCodes.Count == 0
+            ? new List<Permission>()
+            : await _context.Permissions
+                .Where(p => touchedCodes.Contains(p.Code))
+                .ToListAsync();
+        var existingByCode = existing.ToDictionary(p => p.Code, StringComparer.Ordinal);
+
+        var added = 0;
+        var updated = 0;
+        var toDelete = new List<Permission>();
+
+        if (conflicts.Count == 0)
+        {
+            foreach (var item in wantedItems)
+            {
+                if (existingByCode.TryGetValue(item.Code, out var permission))
+                {
+                    // 只允许"不存在"或"已归属本子系统"两种情况，其余（他方归属/UMS 内置/自定义）已在格式
+                    // 校验后由归属判断拦截——子系统 code 前缀规则已排除内置码，这里兜底防御
+                    if (!permission.SubsystemId.HasValue || permission.SubsystemId.Value != subsystemId)
+                    {
+                        conflicts.Add(item.Code);
+                        continue;
+                    }
+
+                    if ((!string.IsNullOrWhiteSpace(item.Name) && item.Name!.Trim() != permission.Name) ||
+                        (item.Description is not null && item.Description.Trim() != permission.Description))
+                    {
+                        if (!string.IsNullOrWhiteSpace(item.Name))
+                        {
+                            permission.Name = item.Name!.Trim();
+                        }
+
+                        permission.Description = item.Description?.Trim();
+                        updated++;
+                    }
+                }
+                else
+                {
+                    _context.Permissions.Add(new Permission
+                    {
+                        Code = item.Code,
+                        Name = string.IsNullOrWhiteSpace(item.Name) ? item.Code : item.Name!.Trim(),
+                        Category = subsystemCode,
+                        IsSpecial = false,
+                        IsSystem = false,
+                        Description = item.Description?.Trim() ?? $"由子系统 {subsystemCode} 自注册",
+                        SubsystemId = subsystemId,
+                        CreatedAt = DateTime.UtcNow
+                    });
+
+                    added++;
+                }
+            }
+
+            // 全量同步语义：清单外、原归属本子系统的权限直接删除（组授权由 FK 级联清理）
+            if (conflicts.Count == 0)
+            {
+                foreach (var permission in owned.Where(p => !wanted.Contains(p.Code, StringComparer.Ordinal)))
+                {
+                    toDelete.Add(permission);
+                }
+            }
+        }
+
+        // 存在冲突 → 整体拒绝，不落库
+        if (conflicts.Count > 0)
+        {
+            _logger.LogWarning(
+                "子系统 {SubsystemCode}({SubsystemId}) 权限自注册被拒绝，冲突码：{Conflicts}",
+                subsystemCode, subsystemId, string.Join(", ", conflicts));
+
+            return new SubsystemPermissionSyncResult(0, 0, 0, conflicts);
+        }
+
+        // 删除前先查受影响用户（权限删除后无法再反查），用于失效其权限缓存
+        var deleteIds = toDelete.Select(p => p.Id).ToList();
+        var affectedUserIds = deleteIds.Count == 0
+            ? new List<ulong>()
+            : await _context.UserGroupPermissions
+                .Where(gp => deleteIds.Contains(gp.PermissionId))
+                .Join(_context.UserGroupMembers,
+                    gp => gp.GroupId,
+                    member => member.GroupId,
+                    (gp, member) => member.UserId)
+                .Distinct()
+                .ToListAsync();
+
+        if (toDelete.Count > 0)
+        {
+            _context.Permissions.RemoveRange(toDelete);
+        }
+
+        await _context.SaveChangesAsync();
+        await InvalidateUsersPermissionCacheAsync(affectedUserIds);
+
+        _logger.LogInformation(
+            "子系统 {SubsystemCode}({SubsystemId}) 权限自注册同步：新增 {Added}、更新 {Updated}、删除 {Deleted}、失效缓存用户 {Users}",
+            subsystemCode, subsystemId, added, updated, toDelete.Count, affectedUserIds.Count);
+
+        return new SubsystemPermissionSyncResult(added, updated, toDelete.Count, conflicts);
+    }
+
     // ============ 权限检查 ============
 
     public async Task<bool> HasPermissionAsync(ulong userId, string permissionCode)
@@ -75,9 +219,44 @@ public class PermissionService : IPermissionService
         return permissionCodes;
     }
 
+    public async Task<List<string>> GetEffectivePermissionCodesAsync(ulong userId)
+    {
+        var granted = await GetUserPermissionCodesAsync(userId);
+        var effective = new HashSet<string>(granted, StringComparer.Ordinal);
+
+        // A 权限：展开为系统内全部权限码（含后续新增的自定义权限）
+        if (granted.Contains(PermissionCodes.PermA))
+        {
+            var allCodes = await _context.Permissions.Select(p => p.Code).ToListAsync();
+            effective.UnionWith(allCodes);
+            effective.Add(PermissionCodes.PermA);
+            return effective.ToList();
+        }
+
+        // B 权限：追加权限管理 + 用户组管理类权限
+        if (granted.Contains(PermissionCodes.PermB))
+            effective.UnionWith(PermissionCodes.BPermissionOverrides);
+
+        // C 权限：追加服务器管理类权限
+        if (granted.Contains(PermissionCodes.PermC))
+            effective.UnionWith(PermissionCodes.CPermissionOverrides);
+
+        return effective.ToList();
+    }
+
     public Task InvalidateUserPermissionCacheAsync(ulong userId)
     {
         _cache.Remove($"user_permissions_{userId}");
+        return Task.CompletedTask;
+    }
+
+    public Task InvalidateUsersPermissionCacheAsync(IEnumerable<ulong> userIds)
+    {
+        foreach (var userId in userIds.Distinct())
+        {
+            _cache.Remove($"user_permissions_{userId}");
+        }
+
         return Task.CompletedTask;
     }
 
@@ -95,13 +274,20 @@ public class PermissionService : IPermissionService
 
     public async Task<List<Permission>> GetAllPermissionsAsync()
     {
-        return await _context.Permissions.OrderBy(p => p.Category).ThenBy(p => p.Id).ToListAsync();
+        return await _context.Permissions
+            .Include(p => p.Subsystem)
+            .OrderBy(p => p.Category)
+            .ThenBy(p => p.Id)
+            .ToListAsync();
     }
 
     public async Task<List<Permission>> GetCustomPermissionsAsync()
     {
+        // 公共端点使用：必须排除子系统注册的权限（IsSystem=false 的子系统权限
+        // 属于子系统私有声明，不应在未认证端点暴露其归属与描述）
         return await _context.Permissions
-            .Where(p => !p.IsSystem)
+            .Include(p => p.Subsystem)
+            .Where(p => !p.IsSystem && p.SubsystemId == null)
             .OrderBy(p => p.Category)
             .ThenBy(p => p.Id)
             .ToListAsync();
@@ -137,259 +323,6 @@ public class PermissionService : IPermissionService
         return true;
     }
 
-    // ============ 用户组 CRUD ============
-
-    public async Task<UserGroup?> GetGroupByIdAsync(ulong id)
-    {
-        return await _context.UserGroups
-            .Include(g => g.Members)
-            .Include(g => g.GroupPermissions)
-            .FirstOrDefaultAsync(g => g.Id == id);
-    }
-
-    public async Task<UserGroup?> GetGroupByNameAsync(string name)
-    {
-        return await _context.UserGroups
-            .FirstOrDefaultAsync(g => g.Name == name);
-    }
-
-    public async Task<List<UserGroup>> GetAllGroupsAsync()
-    {
-        return await _context.UserGroups
-            .Include(g => g.Members)
-            .Include(g => g.GroupPermissions)
-                .ThenInclude(gp => gp.Permission)
-            .OrderBy(g => g.Id)
-            .ToListAsync();
-    }
-
-    public async Task<(List<UserGroup> Groups, int TotalCount)> GetGroupsPagedAsync(int page, int pageSize)
-    {
-        var totalCount = await _context.UserGroups.CountAsync();
-        var groups = await _context.UserGroups
-            .Include(g => g.Members)
-            .Include(g => g.GroupPermissions)
-            .OrderBy(g => g.Id)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
-
-        return (groups, totalCount);
-    }
-
-    public async Task<UserGroup> CreateGroupAsync(UserGroup group)
-    {
-        _context.UserGroups.Add(group);
-        await _context.SaveChangesAsync();
-        return group;
-    }
-
-    public async Task<UserGroup?> UpdateGroupAsync(ulong id, string? name, string? description)
-    {
-        var group = await _context.UserGroups.FindAsync(id);
-        if (group == null) return null;
-
-        if (name != null) group.Name = name;
-        if (description != null) group.Description = description;
-
-        await _context.SaveChangesAsync();
-        return group;
-    }
-
-    public async Task<bool> DeleteGroupAsync(ulong id)
-    {
-        var group = await _context.UserGroups.FindAsync(id);
-        if (group == null) return false;
-
-        _context.UserGroups.Remove(group);
-        await _context.SaveChangesAsync();
-        return true;
-    }
-
-    // ============ 成员管理 ============
-
-    public async Task<bool> AddMemberAsync(ulong groupId, ulong userId)
-    {
-        var exists = await _context.UserGroupMembers
-            .AnyAsync(m => m.GroupId == groupId && m.UserId == userId);
-
-        if (exists) return false;
-
-        var member = new UserGroupMember
-        {
-            GroupId = groupId,
-            UserId = userId,
-            JoinedAt = DateTime.UtcNow
-        };
-
-        _context.UserGroupMembers.Add(member);
-        await _context.SaveChangesAsync();
-        await InvalidateUserPermissionCacheAsync(userId);
-        return true;
-    }
-
-    public async Task<bool> RemoveMemberAsync(ulong groupId, ulong userId)
-    {
-        // 系统初始用户 (uid=0) 不可从任何用户组移除
-        if (userId == 0)
-            return false;
-
-        var member = await _context.UserGroupMembers
-            .FirstOrDefaultAsync(m => m.GroupId == groupId && m.UserId == userId);
-
-        if (member == null) return false;
-
-        _context.UserGroupMembers.Remove(member);
-        await _context.SaveChangesAsync();
-        await InvalidateUserPermissionCacheAsync(userId);
-        return true;
-    }
-
-    public async Task<bool> SetUserGroupsAsync(ulong userId, List<ulong> groupIds)
-    {
-        var distinctIds = groupIds.Distinct().ToList();
-
-        // 验证所有用户组存在
-        var existingGroupIds = await _context.UserGroups
-            .Where(g => distinctIds.Contains(g.Id))
-            .Select(g => g.Id)
-            .ToListAsync();
-        if (existingGroupIds.Count != distinctIds.Count)
-            return false;
-
-        // 获取当前成员关系
-        var currentMemberships = await _context.UserGroupMembers
-            .Where(m => m.UserId == userId)
-            .ToListAsync();
-        var currentGroupIds = currentMemberships.Select(m => m.GroupId).ToHashSet();
-
-        // uid=0 不能被移出初始用户组
-        if (userId == 0)
-        {
-            var initialGroup = await GetGroupByNameAsync(PermissionCodes.InitialGroupName);
-            if (initialGroup != null && !distinctIds.Contains(initialGroup.Id))
-            {
-                distinctIds.Add(initialGroup.Id);
-            }
-        }
-
-        // 移除不再需要的组
-        var toRemove = currentMemberships
-            .Where(m => !distinctIds.Contains(m.GroupId))
-            .ToList();
-        if (toRemove.Any())
-        {
-            _context.UserGroupMembers.RemoveRange(toRemove);
-        }
-
-        // 添加新的组
-        foreach (var groupId in distinctIds)
-        {
-            if (!currentGroupIds.Contains(groupId))
-            {
-                _context.UserGroupMembers.Add(new UserGroupMember
-                {
-                    GroupId = groupId,
-                    UserId = userId,
-                    JoinedAt = DateTime.UtcNow
-                });
-            }
-        }
-
-        await _context.SaveChangesAsync();
-        await InvalidateUserPermissionCacheAsync(userId);
-        return true;
-    }
-
-    public async Task<List<UserGroupMember>> GetGroupMembersAsync(ulong groupId)
-    {
-        return await _context.UserGroupMembers
-            .Include(m => m.User)
-            .Where(m => m.GroupId == groupId)
-            .OrderBy(m => m.JoinedAt)
-            .ToListAsync();
-    }
-
-    public async Task<List<UserGroupMember>> GetUserGroupsAsync(ulong userId)
-    {
-        return await _context.UserGroupMembers
-            .Where(m => m.UserId == userId)
-            .Include(m => m.Group)
-                .ThenInclude(g => g.Members)
-            .Include(m => m.Group)
-                .ThenInclude(g => g.GroupPermissions)
-            .ToListAsync();
-    }
-
-    // ============ 权限分配 ============
-
-    public async Task<bool> SetGroupPermissionsAsync(ulong groupId, List<ulong> permissionIds)
-    {
-        var distinctIds = permissionIds.Distinct().ToList();
-        var existingIds = await _context.Permissions
-            .Where(p => distinctIds.Contains(p.Id))
-            .Select(p => p.Id)
-            .ToListAsync();
-
-        if (existingIds.Count != distinctIds.Count)
-            return false;
-
-        // 删除旧权限
-        var oldPerms = await _context.UserGroupPermissions
-            .Where(gp => gp.GroupId == groupId)
-            .ToListAsync();
-        _context.UserGroupPermissions.RemoveRange(oldPerms);
-
-        // 添加新权限
-        foreach (var permId in distinctIds)
-        {
-            _context.UserGroupPermissions.Add(new UserGroupPermission
-            {
-                GroupId = groupId,
-                PermissionId = permId,
-                GrantedAt = DateTime.UtcNow
-            });
-        }
-
-        await _context.SaveChangesAsync();
-
-        // 清除该组所有成员的权限缓存
-        var memberIds = await _context.UserGroupMembers
-            .Where(m => m.GroupId == groupId)
-            .Select(m => m.UserId)
-            .ToListAsync();
-
-        foreach (var memberId in memberIds)
-        {
-            await InvalidateUserPermissionCacheAsync(memberId);
-        }
-
-        return true;
-    }
-
-    public async Task<List<Permission>> GetGroupPermissionsAsync(ulong groupId)
-    {
-        return await _context.UserGroupPermissions
-            .Where(gp => gp.GroupId == groupId)
-            .Include(gp => gp.Permission)
-            .Select(gp => gp.Permission)
-            .OrderBy(p => p.Category)
-            .ThenBy(p => p.Id)
-            .ToListAsync();
-    }
-
-    // ============ 用户组 Extras ============
-
-    public async Task<UserGroup?> UpdateGroupExtrasAsync(ulong id, string? extras)
-    {
-        var group = await _context.UserGroups.FindAsync(id);
-        if (group == null) return null;
-
-        group.Extras = extras;
-        await _context.SaveChangesAsync();
-        return group;
-    }
-
     // ============ 种子数据 ============
 
     public async Task SeedPermissionsAndGroupsAsync()
@@ -407,15 +340,20 @@ public class PermissionService : IPermissionService
         var allSeedCodes = new[]
         {
             PermissionCodes.PermA, PermissionCodes.PermB, PermissionCodes.PermC,
-            PermissionCodes.UserRead, PermissionCodes.UserUpdate, PermissionCodes.UserDelete, PermissionCodes.UserList,
+            PermissionCodes.UserRead, PermissionCodes.UserCreate, PermissionCodes.UserUpdate, PermissionCodes.UserDelete,
+            PermissionCodes.UserList,
             PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail, PermissionCodes.UserLogout,
+            PermissionCodes.UserResetPassword,
             PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
             PermissionCodes.AdminStats, PermissionCodes.AdminServer,
             PermissionCodes.PermissionRead, PermissionCodes.PermissionCreate, PermissionCodes.PermissionUpdate, PermissionCodes.PermissionDelete,
             PermissionCodes.UserGroupRead, PermissionCodes.UserGroupCreate, PermissionCodes.UserGroupUpdate, PermissionCodes.UserGroupDelete,
             PermissionCodes.UserGroupManageMembers, PermissionCodes.UserGroupManagePermissions,
             PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage,
-            PermissionCodes.SystemSettingRead, PermissionCodes.SystemSettingUpdate
+            PermissionCodes.SystemSettingRead, PermissionCodes.SystemSettingUpdate,
+            PermissionCodes.SmtpRead, PermissionCodes.SmtpUpdate,
+            PermissionCodes.SubsystemRead, PermissionCodes.SubsystemCreate,
+            PermissionCodes.SubsystemUpdate, PermissionCodes.SubsystemDelete
         };
 
         var existingCodes = (await _context.Permissions.Select(p => p.Code).ToListAsync()).ToHashSet();
@@ -453,12 +391,14 @@ public class PermissionService : IPermissionService
         PermissionCodes.PermB => ("权限组管理权限", "special", "可以管理权限表和用户组（除ABC权限外的所有权限）"),
         PermissionCodes.PermC => ("服务器配置管理权限", "special", "可以使用服务器管理相关API"),
         PermissionCodes.UserRead => ("查看用户", "user", "查看用户信息"),
+        PermissionCodes.UserCreate => ("创建用户", "user", "管理员直接创建用户（可跳过邮箱验证）"),
         PermissionCodes.UserUpdate => ("更新用户", "user", "更新用户信息"),
         PermissionCodes.UserDelete => ("删除用户", "user", "删除用户"),
         PermissionCodes.UserList => ("用户列表", "user", "查看用户列表"),
         PermissionCodes.UserChangePassword => ("修改密码", "user", "修改用户密码"),
         PermissionCodes.UserChangeEmail => ("修改邮箱", "user", "修改用户邮箱"),
         PermissionCodes.UserLogout => ("登出", "user", "用户登出"),
+        PermissionCodes.UserResetPassword => ("重置密码", "user", "重置指定用户的登录密码"),
         PermissionCodes.AvatarUpload => ("上传头像", "avatar", "上传用户头像"),
         PermissionCodes.AvatarDelete => ("删除头像", "avatar", "删除用户头像"),
         PermissionCodes.AdminStats => ("查看统计", "admin", "查看管理员统计数据"),
@@ -478,6 +418,12 @@ public class PermissionService : IPermissionService
         PermissionCodes.FollowManage => ("管理关注设置", "follow", "管理关注列表隐私设置"),
         PermissionCodes.SystemSettingRead => ("查看系统设置", "system-setting", "查看系统设置信息"),
         PermissionCodes.SystemSettingUpdate => ("更新系统设置", "system-setting", "更新系统设置信息"),
+        PermissionCodes.SmtpRead => ("查看邮件配置", "smtp", "查看邮件服务配置"),
+        PermissionCodes.SmtpUpdate => ("管理邮件配置", "smtp", "修改邮件服务配置并发送测试邮件"),
+        PermissionCodes.SubsystemRead => ("查看子系统", "subsystem", "查看接入的子系统与凭证信息"),
+        PermissionCodes.SubsystemCreate => ("创建子系统", "subsystem", "登记子系统并签发访问凭证"),
+        PermissionCodes.SubsystemUpdate => ("管理子系统", "subsystem", "更新子系统信息、启停与重置密钥"),
+        PermissionCodes.SubsystemDelete => ("删除子系统", "subsystem", "删除子系统并使其凭证失效"),
         _ => (code, "custom", "")
     };
 
@@ -485,31 +431,59 @@ public class PermissionService : IPermissionService
     {
         var existingNames = (await _context.UserGroups.Select(g => g.Name).ToListAsync()).ToHashSet();
 
-        var seedGroups = new (string Name, string Description, bool IsProtected, bool IsMemberLocked)[]
+        var seedGroups = new (string Name, string Description, bool IsProtected, bool IsMemberLocked, int Level, bool IsDefaultForNewUsers)[]
         {
-            (PermissionCodes.InitialGroupName, "系统初始用户组，仅持有最高权限，不可编辑", true, true),
-            (PermissionCodes.SuperAdminGroupName, "持有除A权限外的所有权限", true, false),
-            (PermissionCodes.AdminGroupName, "拥有用户管理和基本管理权限", false, false),
-            (PermissionCodes.NormalGroupName, "基本用户权限", false, false)
+            (PermissionCodes.InitialGroupName, "系统初始用户组，仅持有最高权限，不可编辑", true, true, PermissionCodes.GroupLevel.InitialUser, false),
+            (PermissionCodes.SuperAdminGroupName, "持有除A权限外的所有权限", true, false, PermissionCodes.GroupLevel.SuperAdmin, false),
+            (PermissionCodes.AdminGroupName, "拥有用户管理和基本管理权限", false, false, PermissionCodes.GroupLevel.Admin, false),
+            // 「普通用户」开启「基本用户权限」标记，使新注册用户默认加入该组
+            (PermissionCodes.NormalGroupName, "基本用户权限", false, false, PermissionCodes.GroupLevel.NormalUser, true)
         };
 
         var missing = seedGroups.Where(g => !existingNames.Contains(g.Name)).ToList();
-        if (!missing.Any()) return;
-
-        _logger.LogInformation("Seeding {Count} missing user groups...", missing.Count);
-
-        foreach (var g in missing)
+        if (missing.Any())
         {
-            _context.UserGroups.Add(new UserGroup
+            _logger.LogInformation("Seeding {Count} missing user groups...", missing.Count);
+
+            foreach (var g in missing)
             {
-                Name = g.Name,
-                Description = g.Description,
-                IsProtected = g.IsProtected,
-                IsMemberLocked = g.IsMemberLocked
-            });
+                _context.UserGroups.Add(new UserGroup
+                {
+                    Name = g.Name,
+                    Description = g.Description,
+                    IsProtected = g.IsProtected,
+                    IsMemberLocked = g.IsMemberLocked,
+                    Level = g.Level,
+                    IsDefaultForNewUsers = g.IsDefaultForNewUsers
+                });
+            }
+
+            await _context.SaveChangesAsync();
         }
 
-        await _context.SaveChangesAsync();
+        // 旧库升级：为已存在、但级别仍不正确的预设权限组回填级别
+        var presetLevels = seedGroups.ToDictionary(g => g.Name, g => g.Level);
+        var presetNames = seedGroups.Select(g => g.Name).ToArray();
+        var existing = await _context.UserGroups
+            .Where(g => presetNames.Contains(g.Name))
+            .ToListAsync();
+
+        var changed = false;
+        foreach (var group in existing)
+        {
+            var expected = presetLevels[group.Name];
+            if (group.Level != expected)
+            {
+                group.Level = expected;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            await _context.SaveChangesAsync();
+            _logger.LogInformation("Backfilled privilege levels for preset user groups");
+        }
     }
 
     private async Task SeedGroupPermissionsIfMissingAsync()
@@ -549,7 +523,7 @@ public class PermissionService : IPermissionService
             var adminPermCodes = new[]
             {
                 PermissionCodes.UserRead, PermissionCodes.UserUpdate, PermissionCodes.UserDelete, PermissionCodes.UserList,
-                PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail,
+                PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail, PermissionCodes.UserResetPassword,
                 PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
                 PermissionCodes.AdminStats, PermissionCodes.UserGroupRead, PermissionCodes.UserLogout,
                 PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage,

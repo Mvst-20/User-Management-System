@@ -1,0 +1,36 @@
+@* 按有效权限控制子内容显隐；权限集合加载后自动刷新 *@
+@implements IDisposable
+@inject PermissionState Permissions
+
+@if (Visible)
+{
+    @ChildContent
+}
+
+@code {
+    /// <summary>要求具备的权限码；为空表示无需权限。</summary>
+    [Parameter] public string? Code { get; set; }
+
+    /// <summary>满足其中任意一项权限即可；优先级高于 <see cref="Code"/>。</summary>
+    [Parameter] public string[]? AnyOf { get; set; }
+
+    /// <summary>反向判断：渲染"不具备该权限"时的内容（如无权限提示）。</summary>
+    [Parameter] public bool Inverse { get; set; }
+
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private bool HasRequired => AnyOf is { Length: > 0 }
+        ? Permissions.HasAny(AnyOf)
+        : Permissions.Has(Code);
+
+    /// <summary>
+    /// 权限集合尚未加载完成时不渲染，避免"无权限"内容的瞬时误判。
+    /// </summary>
+    private bool Visible => Permissions.Loaded && (Inverse ? !HasRequired : HasRequired);
+
+    protected override void OnInitialized() => Permissions.Changed += OnPermissionsChanged;
+
+    private void OnPermissionsChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Permissions.Changed -= OnPermissionsChanged;
+}

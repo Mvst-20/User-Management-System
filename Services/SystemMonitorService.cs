@@ -4,23 +4,6 @@ using System.Runtime.InteropServices;
 
 namespace UserManagementSystem.Services;
 
-public interface ISystemMonitorService
-{
-    SystemStatus GetSystemStatus();
-}
-
-public record SystemStatus(
-    TimeSpan Uptime,
-    double CpuUsage,
-    double MemoryUsage,
-    long MemoryUsedBytes,
-    long MemoryTotalBytes,
-    long NetworkBytesSent,
-    long NetworkBytesReceived,
-    double NetworkSendRate,
-    double NetworkReceiveRate
-);
-
 public class SystemMonitorService : ISystemMonitorService
 {
     private readonly ILogger<SystemMonitorService> _logger;
@@ -50,7 +33,6 @@ public class SystemMonitorService : ISystemMonitorService
     {
         _logger = logger;
         
-        // 初始化采样
         InitializeSampling();
     }
 
@@ -58,12 +40,10 @@ public class SystemMonitorService : ISystemMonitorService
     {
         try
         {
-            // 初始化网络采样
             var networkStats = GetNetworkStats();
             _lastNetworkBytesSent = networkStats.BytesSent;
             _lastNetworkBytesReceived = networkStats.BytesReceived;
             
-            // 初始化 CPU 采样（系统级）
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 InitializeWindowsCpuSampling();
@@ -392,7 +372,6 @@ public class SystemMonitorService : ISystemMonitorService
 
                 if (elapsedSeconds > 0)
                 {
-                    // 计算速率（字节/秒）
                     _networkSendRate = (stats.BytesSent - _lastNetworkBytesSent) / elapsedSeconds;
                     _networkReceiveRate = (stats.BytesReceived - _lastNetworkBytesReceived) / elapsedSeconds;
                 }
@@ -423,7 +402,6 @@ public class SystemMonitorService : ISystemMonitorService
 
         try
         {
-            // 获取所有网络接口的统计信息
             foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
             {
                 // 排除回环接口和非活动接口

@@ -130,7 +130,7 @@ public static class AvatarEndpoints
                 image.SaveAsGif(stream);
                 break;
             case ".webp":
-                image.SaveAsWebp(stream, new SixLabors.ImageSharp.Formats.Webp.WebpEncoder { Quality = JpegQuality });
+                image.SaveAsWebp(stream, new WebpEncoder { Quality = JpegQuality });
                 break;
             default:
                 image.SaveAsJpeg(stream, new JpegEncoder { Quality = JpegQuality });
@@ -178,8 +178,6 @@ public static class AvatarEndpoints
             [FromServices] IUserService userService,
             HttpContext httpContext) =>
         {
-            try
-            {
             var logger = httpContext.RequestServices.GetRequiredService<ILoggerFactory>()
                 .CreateLogger("AvatarUpload");
 
@@ -315,18 +313,10 @@ public static class AvatarEndpoints
             }
             catch (Exception ex)
             {
+                // 清理已写入的文件后重抛，由全局异常中间件统一返回 500
                 logger.LogError(ex, "[AVATAR-UPLOAD] FAIL: unhandled exception while processing");
                 DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
                 throw;
-            }
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, $"OUTER-{ex.Message}"));
-            }
-            catch (Exception ex)
-            {
-                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, $"OUTER-{ex.GetType().Name}:{ex.Message}"));
             }
         }).RequireAuthorization().RequirePermission(PermissionCodes.AvatarUpload, allowSelf: true).DisableAntiforgery();
 

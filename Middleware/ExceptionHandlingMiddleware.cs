@@ -1,7 +1,7 @@
 using System.Net;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using UserManagementSystem.DTOs;
+using UserManagementSystem.Exceptions;
 
 namespace UserManagementSystem.Middleware;
 
@@ -37,14 +37,22 @@ public class ExceptionHandlingMiddleware
             await TryWriteJsonError(context, (int)HttpStatusCode.BadRequest,
                 new ApiResponse(ResultCodes.ValidationError, "请求格式错误"));
         }
+        catch (BusinessException ex)
+        {
+            // 业务错误：服务层显式抛出，message 即面向客户端的业务文案
+            _logger.LogWarning("[BUSINESS] {Method} {Path} | Code={Code} | {Message}",
+                context.Request.Method, context.Request.Path, ex.Code, ex.Message);
+
+            await TryWriteJsonError(context, ex.StatusCode,
+                new ApiResponse(ex.Code, ex.Message));
+        }
         catch (Exception ex)
         {
             // Extract request context for structured log
             var method = context.Request.Method;
             var path = context.Request.Path + context.Request.QueryString;
             var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            var userId = context.User?.FindFirst("uid")?.Value
-                ?? context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+            var userId = context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
                 ?? "anonymous";
 
             _logger.LogError(ex,
@@ -81,23 +89,19 @@ public class ExceptionHandlingMiddleware
 
     private async Task HandleExceptionAsync(HttpContext context, Exception exception)
     {
+        // 意外异常（内部 bug / 基础设施故障）统一处理；业务错误应使用 BusinessException
         var (statusCode, code, message) = exception switch
         {
-            ArgumentException => (HttpStatusCode.BadRequest, ResultCodes.ValidationError, exception.Message),
+            ArgumentException => (HttpStatusCode.BadRequest, ResultCodes.ValidationError, "请求参数错误"),
             UnauthorizedAccessException => (HttpStatusCode.Unauthorized, ResultCodes.Unauthorized, "未授权"),
             KeyNotFoundException => (HttpStatusCode.NotFound, ResultCodes.NotFound, "资源不存在"),
-            InvalidOperationException => (HttpStatusCode.BadRequest, ResultCodes.Error, "请求处理失败"),
             _ => (HttpStatusCode.InternalServerError, ResultCodes.InternalServerError, "服务器内部错误")
         };
 
-        // 生产环境仅暴露通用错误信息，不泄露异常类型等内部细节
+        // 生产环境仅暴露通用错误信息，不泄露异常类型/内部细节；开发环境附带异常消息便于排查
         var displayMessage = _env.IsDevelopment()
             ? $"{message}: {exception.Message}"
-            : exception switch
-            {
-                InvalidOperationException => $"处理失败: {exception.Message}",
-                _ => message
-            };
+            : message;
 
         await TryWriteJsonError(context, (int)statusCode,
             new ApiResponse(code, displayMessage));

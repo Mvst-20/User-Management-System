@@ -22,7 +22,6 @@ public class SystemSettingService : ISystemSettingService
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
-    // 系统设置键名常量
     public static class SettingKeys
     {
         public const string SiteName = "site_name";
@@ -112,7 +111,13 @@ public class SystemSettingService : ISystemSettingService
 
     public async Task<SettingResponse> UpdateSettingAsync(string key, UpdateSettingRequest request, ulong updatedBy)
     {
-        var setting = await SetSettingAsync(key, request.Value, "string", null, updatedBy);
+        // 保留已存在设置的 ValueType（如 bool/json），避免被覆盖为 string；仅新建时默认为 string
+        var existingType = await _context.SystemSettings
+            .Where(s => s.Key == key)
+            .Select(s => s.ValueType)
+            .FirstOrDefaultAsync();
+
+        var setting = await SetSettingAsync(key, request.Value, existingType ?? "string", null, updatedBy);
 
         return new SettingResponse(
             setting.Key,
@@ -198,7 +203,6 @@ public class SystemSettingService : ISystemSettingService
 
         await _context.SaveChangesAsync();
 
-        // 清除缓存
         _cache.Remove($"setting_{key}");
 
         _logger.LogInformation("Setting '{Key}' updated by user {UserId}", key, updatedBy);

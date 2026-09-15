@@ -1,0 +1,378 @@
+@page "/permissions"
+@attribute [Authorize]
+
+@inject UcsApiClient Api
+
+<PageTitle>权限管理 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="权限管理" OnRefresh="LoadAsync" RefreshLoading="_loading">
+    <Actions>
+        <PermissionGate Code="@PermissionCodes.PermissionCreate">
+            <Button Type="@ButtonType.Primary" OnClick="OpenCreate">新建权限</Button>
+        </PermissionGate>
+    </Actions>
+
+    <ChildContent>
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+        <UcsNotice Message="@_modalError" Kind="error" OnDismiss="@(() => _modalError = null)" />
+
+        <Card Bordered="false">
+            <div class="ucs-filter-bar">
+                <div class="ucs-filter-item">
+                    <span class="ucs-filter-label">来源</span>
+                    <select class="ucs-native-select" @bind="_sourceFilter">
+                        <option value="">全部</option>
+                        <option value="ums">UMS</option>
+                        <option value="subsystem">全部子系统</option>
+                        @foreach (var subsystem in SubsystemOptions)
+                        {
+                            <option value="@($"subsystem:{subsystem.Id}")">└ @subsystem.Name</option>
+                        }
+                        <option value="custom">自定义</option>
+                    </select>
+                </div>
+                <div class="ucs-filter-item">
+                    <span class="ucs-filter-label">分类</span>
+                    <select class="ucs-native-select" @bind="_categoryFilter">
+                        <option value="">全部</option>
+                        @foreach (var category in Categories)
+                        {
+                            <option value="@category">@category</option>
+                        }
+                    </select>
+                </div>
+                <div class="ucs-filter-item">
+                    <span class="ucs-filter-label">关键词</span>
+                    <input class="ucs-native-input" @bind="_keyword" @bind:event="oninput" placeholder="权限代码或名称" />
+                </div>
+                <div class="ucs-filter-actions">
+                    <Button OnClick="ResetFilters">重置</Button>
+                </div>
+            </div>
+        </Card>
+
+        @foreach (var section in Sections)
+        {
+            <Card Bordered="false" Title="@($"{section.Title}（{section.Items.Count}）")">
+                <Table TItem="PermissionResponse"
+                       DataSource="section.Items"
+                       Loading="_loading"
+                       Bordered="false"
+                       Striped="true">
+                    <PropertyColumn Title="ID" Property="c => c.Id" />
+                    <PropertyColumn Title="代码" Property="c => c.Code" />
+                    <PropertyColumn Title="名称" Property="c => c.Name" />
+                    <PropertyColumn Title="分类" Property="c => c.Category" />
+                    <Column TData="PermissionResponse" Title="类型">
+                        @if (context.IsSpecial)
+                        {
+                            <span class="ucs-chip is-gold">特殊</span>
+                        }
+                        else if (context.IsSystem)
+                        {
+                            <span class="ucs-chip is-info">内置</span>
+                        }
+                        else if (context.SubsystemId is not null)
+                        {
+                            @* 子系统自注册的权限：类型徽章显示归属子系统的名称，而非"自定义" *@
+                            <span class="ucs-chip is-info" title="@($"归属子系统：{context.SubsystemName}")">@context.SubsystemName</span>
+                        }
+                        else
+                        {
+                            <span class="ucs-chip is-success">自定义</span>
+                        }
+                    </Column>
+                    <PropertyColumn Title="描述" Property="c => c.Description" />
+                    <Column TData="PermissionResponse" Title="操作">
+                        <Space>
+                            <PermissionGate Code="@PermissionCodes.PermissionUpdate">
+                                <Button OnClick="@(() => OpenEdit(context))" Disabled="@(context.IsSpecial || context.IsSystem)">编辑</Button>
+                            </PermissionGate>
+                            @* 仅业务自定义权限可删除：内置/特殊/子系统注册的权限一律隐藏删除按钮，
+                               子系统权限的移除途径是卸载对应子系统（级联删除） *@
+                            @if (context.SubsystemId is null && !context.IsSpecial && !context.IsSystem)
+                            {
+                                <PermissionGate Code="@PermissionCodes.PermissionDelete">
+                                    <Popconfirm Title="@DeleteConfirmText(context)"
+                                                OnConfirm="@(_ => DeleteAsync(context))">
+                                        <Button Danger="true">删除</Button>
+                                    </Popconfirm>
+                                </PermissionGate>
+                            }
+                        </Space>
+                    </Column>
+                </Table>
+            </Card>
+        }
+    </ChildContent>
+</PageContainer>
+
+<Modal Title="@(_editing is null ? "新建权限" : "编辑权限")"
+       Visible="_editVisible"
+       ConfirmLoading="_saving"
+       OnOk="@(_ => SaveAsync())"
+       OnCancel="@(_ => _editVisible = false)"
+       DestroyOnClose="true">
+    <div class="ucs-form">
+        @if (_editing is null)
+        {
+            <div class="ucs-field">
+                <label class="ucs-field-label">权限代码</label>
+                <Input @bind-Value="_code" Placeholder="建议格式：模块:操作，如 report:export" />
+            </div>
+        }
+        else
+        {
+            <div class="ucs-field">
+                <label class="ucs-field-label">权限代码</label>
+                <Input Value="_editing.Code" Disabled="true" />
+            </div>
+        }
+        <div class="ucs-field">
+            <label class="ucs-field-label">名称</label>
+            <Input @bind-Value="_name" Placeholder="如：导出报表" />
+        </div>
+        @if (_editing is null)
+        {
+            <div class="ucs-field">
+                <label class="ucs-field-label">分类</label>
+                <Input @bind-Value="_category" Placeholder="如：report" />
+            </div>
+        }
+        <div class="ucs-field">
+            <label class="ucs-field-label">描述</label>
+            <Input @bind-Value="_description" Placeholder="可选" />
+        </div>
+    </div>
+</Modal>
+
+@code {
+    private List<PermissionResponse> _permissions = new();
+    private bool _loading;
+    private bool _saving;
+    private string? _error;
+    private string? _modalError;
+
+    private string _sourceFilter = string.Empty;
+    private string _categoryFilter = string.Empty;
+    private string _keyword = string.Empty;
+
+    private PermissionResponse? _editing;
+    private bool _editVisible;
+    private string _code = string.Empty;
+    private string _name = string.Empty;
+    private string _category = string.Empty;
+    private string _description = string.Empty;
+
+    /// <summary>
+    /// 权限分区：按<strong>归属</strong>划分 —— UMS 自有、各子系统声明、业务自定义。
+    /// </summary>
+    private sealed record PermissionSection(
+        string Title,
+        List<PermissionResponse> Items,
+        string Kind,
+        ulong? SubsystemId = null);
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var result = await Api.GetAsync<List<PermissionResponse>>("/api/permissions");
+            if (result.Success && result.Data is { } data)
+            {
+                _permissions = data;
+            }
+            else
+            {
+                _permissions = new List<PermissionResponse>();
+                _error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载权限列表失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private IEnumerable<string> Categories => _permissions
+        .Select(p => p.Category)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(c => c, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>来源筛选下拉中「各子系统」的动态选项（值格式 subsystem:{id}）。</summary>
+    private IEnumerable<(ulong Id, string Name)> SubsystemOptions => _permissions
+        .Where(p => p.SubsystemId is not null)
+        .GroupBy(p => p.SubsystemId!.Value)
+        .Select(group => (group.Key, group.First().SubsystemName ?? $"#{group.Key}"))
+        .OrderBy(option => option.Key);
+
+    /// <summary>按当前筛选条件计算分区，分区内一律按 ID 升序。</summary>
+    private IEnumerable<PermissionSection> Sections
+    {
+        get
+        {
+            var filtered = _permissions.Where(Matches).ToList();
+
+            var sections = new List<PermissionSection>
+            {
+                // UMS 自有（内置、无归属）
+                new("UMS", filtered.Where(p => p.SubsystemId is null && p.IsSystem)
+                    .OrderBy(p => p.Id).ToList(), "ums")
+            };
+
+            // 每个子系统一组：组名取自子系统名称，组内按 ID 升序
+            var bySubsystem = filtered
+                .Where(p => p.SubsystemId is not null)
+                .GroupBy(p => p.SubsystemId!.Value)
+                .OrderBy(g => g.Key);
+
+            foreach (var group in bySubsystem)
+            {
+                var name = group.FirstOrDefault()?.SubsystemName ?? $"子系统 #{group.Key}";
+                sections.Add(new PermissionSection($"子系统 · {name}",
+                    group.OrderBy(p => p.Id).ToList(), "subsystem", group.Key));
+            }
+
+            // 业务自定义（非内置、无归属）
+            sections.Add(new("自定义权限", filtered.Where(p => p.SubsystemId is null && !p.IsSystem)
+                .OrderBy(p => p.Id).ToList(), "custom"));
+
+            return (_sourceFilter switch
+            {
+                "ums" => sections.Where(s => s.Kind == "ums"),
+                "subsystem" => sections.Where(s => s.Kind == "subsystem"),
+                "custom" => sections.Where(s => s.Kind == "custom"),
+                var source when source.StartsWith("subsystem:", StringComparison.Ordinal)
+                    => ulong.TryParse(source["subsystem:".Length..], out var subsystemId)
+                        ? sections.Where(s => s.SubsystemId == subsystemId)
+                        : sections,
+                _ => sections
+            }).Where(s => s.Items.Count > 0);
+        }
+    }
+
+    private bool Matches(PermissionResponse permission)
+    {
+        if (!string.IsNullOrEmpty(_categoryFilter)
+            && !string.Equals(permission.Category, _categoryFilter, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(_keyword))
+        {
+            return true;
+        }
+
+        var keyword = _keyword.Trim();
+        return permission.Code.Contains(keyword, StringComparison.OrdinalIgnoreCase)
+            || permission.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ResetFilters()
+    {
+        _sourceFilter = string.Empty;
+        _categoryFilter = string.Empty;
+        _keyword = string.Empty;
+    }
+
+    private void OpenCreate()
+    {
+        _editing = null;
+        _code = string.Empty;
+        _name = string.Empty;
+        _category = string.Empty;
+        _description = string.Empty;
+        _modalError = null;
+        _error = null;
+        _editVisible = true;
+    }
+
+    private void OpenEdit(PermissionResponse permission)
+    {
+        _editing = permission;
+        _name = permission.Name;
+        _description = permission.Description ?? string.Empty;
+        _modalError = null;
+        _error = null;
+        _editVisible = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_name) || (_editing is null && string.IsNullOrWhiteSpace(_code)))
+        {
+            _modalError = "请填写权限代码与名称";
+            return;
+        }
+
+        _modalError = null;
+        _saving = true;
+        try
+        {
+            ApiResult<object> result;
+            if (_editing is null)
+            {
+                result = await Api.PostAsync<object>("/api/permissions", new
+                {
+                    code = _code.Trim(),
+                    name = _name.Trim(),
+                    category = string.IsNullOrWhiteSpace(_category) ? "custom" : _category.Trim(),
+                    description = string.IsNullOrWhiteSpace(_description) ? null : _description.Trim()
+                });
+            }
+            else
+            {
+                result = await Api.PutAsync<object>($"/api/permissions/{_editing.Id}", new
+                {
+                    name = _name.Trim(),
+                    description = string.IsNullOrWhiteSpace(_description) ? null : _description.Trim()
+                });
+            }
+
+            if (result.Success)
+            {
+                _editVisible = false;
+                await LoadAsync();
+            }
+            else
+            {
+                _modalError = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"保存失败：{ex.Message}";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DeleteAsync(PermissionResponse permission)
+    {
+        _error = null;
+        var result = await Api.DeleteAsync<object>($"/api/permissions/{permission.Id}");
+        if (result.Success)
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            _error = result.Message;
+        }
+    }
+
+    private static string DeleteConfirmText(PermissionResponse permission)
+        => "确认删除权限「" + permission.Name + "」？删除后相关权限组将立即失去该权限。";
+}

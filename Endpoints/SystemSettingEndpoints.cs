@@ -11,39 +11,22 @@ public static class SystemSettingEndpoints
     public static void MapSystemSettingEndpoints(this WebApplication app)
     {
         // ============ 公开接口（不需要认证）============
+        // 注意：未预期的异常由全局 ExceptionHandlingMiddleware 统一处理为 500
 
         // 获取系统基本信息
         app.MapGet("/api/system/info", async (
-            [FromServices] ISystemSettingService settingService,
-            [FromServices] ILogger<Program> logger) =>
+            [FromServices] ISystemSettingService settingService) =>
         {
-            try
-            {
-                var info = await settingService.GetSystemInfoAsync();
-                return Results.Ok(new ApiResponse(0, "获取成功", info));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to get system info");
-                return Results.StatusCode(500);
-            }
+            var info = await settingService.GetSystemInfoAsync();
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", info));
         });
 
         // 获取友情链接
         app.MapGet("/api/system/friend-links", async (
-            [FromServices] ISystemSettingService settingService,
-            [FromServices] ILogger<Program> logger) =>
+            [FromServices] ISystemSettingService settingService) =>
         {
-            try
-            {
-                var links = await settingService.GetFriendLinksAsync();
-                return Results.Ok(new ApiResponse(0, "获取成功", links));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to get friend links");
-                return Results.StatusCode(500);
-            }
+            var links = await settingService.GetFriendLinksAsync();
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", links));
         });
 
         // ============ 管理接口（需要权限）============
@@ -52,77 +35,41 @@ public static class SystemSettingEndpoints
         app.MapPut("/api/admin/system/info", async (
             [FromBody] UpdateSystemInfoRequest request,
             ClaimsPrincipal currentUser,
-            [FromServices] ISystemSettingService settingService,
-            [FromServices] ILogger<Program> logger) =>
+            [FromServices] ISystemSettingService settingService) =>
         {
-            try
-            {
-                var userId = currentUser.GetRequiredUserId();
-                var result = await settingService.UpdateSystemInfoAsync(request, userId);
-                return Results.Ok(new ApiResponse(0, "更新成功", result));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to update system info");
-                return Results.StatusCode(500);
-            }
+            var userId = currentUser.GetRequiredUserId();
+            var result = await settingService.UpdateSystemInfoAsync(request, userId);
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "更新成功", result));
         }).RequireAuthorization().RequirePermission(PermissionCodes.SystemSettingUpdate);
 
         // 更新友情链接
         app.MapPut("/api/admin/system/friend-links", async (
             [FromBody] UpdateFriendLinksRequest request,
             ClaimsPrincipal currentUser,
-            [FromServices] ISystemSettingService settingService,
-            [FromServices] ILogger<Program> logger) =>
+            [FromServices] ISystemSettingService settingService) =>
         {
-            try
-            {
-                var userId = currentUser.GetRequiredUserId();
-                var result = await settingService.UpdateFriendLinksAsync(request, userId);
-                return Results.Ok(new ApiResponse(0, "更新成功", result));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to update friend links");
-                return Results.StatusCode(500);
-            }
+            var userId = currentUser.GetRequiredUserId();
+            var result = await settingService.UpdateFriendLinksAsync(request, userId);
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "更新成功", result));
         }).RequireAuthorization().RequirePermission(PermissionCodes.SystemSettingUpdate);
 
         // 获取所有设置
         app.MapGet("/api/admin/system/settings", async (
-            [FromServices] ISystemSettingService settingService,
-            [FromServices] ILogger<Program> logger) =>
+            [FromServices] ISystemSettingService settingService) =>
         {
-            try
-            {
-                var settings = await settingService.GetAllSettingsAsync();
-                return Results.Ok(new ApiResponse(0, "获取成功", settings));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to get all settings");
-                return Results.StatusCode(500);
-            }
+            var settings = await settingService.GetAllSettingsAsync();
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", settings));
         }).RequireAuthorization().RequirePermission(PermissionCodes.SystemSettingRead);
 
         // 获取单个设置
         app.MapGet("/api/admin/system/settings/{key}", async (
             string key,
-            [FromServices] ISystemSettingService settingService,
-            [FromServices] ILogger<Program> logger) =>
+            [FromServices] ISystemSettingService settingService) =>
         {
-            try
-            {
-                var setting = await settingService.GetSettingAsync(key);
-                return setting != null
-                    ? Results.Ok(new ApiResponse(0, "获取成功", setting))
-                    : Results.NotFound(new ApiResponse(404, "设置不存在"));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to get setting {Key}", key);
-                return Results.StatusCode(500);
-            }
+            var setting = await settingService.GetSettingAsync(key);
+            return setting != null
+                ? Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", setting))
+                : Results.NotFound(new ApiResponse(ResultCodes.NotFound, "设置不存在"));
         }).RequireAuthorization().RequirePermission(PermissionCodes.SystemSettingRead);
 
         // 更新单个设置
@@ -130,20 +77,11 @@ public static class SystemSettingEndpoints
             string key,
             [FromBody] UpdateSettingRequest request,
             ClaimsPrincipal currentUser,
-            [FromServices] ISystemSettingService settingService,
-            [FromServices] ILogger<Program> logger) =>
+            [FromServices] ISystemSettingService settingService) =>
         {
-            try
-            {
-                var userId = currentUser.GetRequiredUserId();
-                var result = await settingService.UpdateSettingAsync(key, request, userId);
-                return Results.Ok(new ApiResponse(0, "更新成功", result));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to update setting {Key}", key);
-                return Results.StatusCode(500);
-            }
+            var userId = currentUser.GetRequiredUserId();
+            var result = await settingService.UpdateSettingAsync(key, request, userId);
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "更新成功", result));
         }).RequireAuthorization().RequirePermission(PermissionCodes.SystemSettingUpdate);
     }
 }

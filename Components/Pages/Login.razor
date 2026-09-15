@@ -1,0 +1,137 @@
+@page "/login"
+@layout EmptyLayout
+@attribute [AllowAnonymous]
+
+@inject UcsApiClient Api
+@inject NavigationManager Navigation
+@inject PermissionState Permissions
+
+<PageTitle>登录 · @_siteName</PageTitle>
+
+<div class="ucs-login">
+    <div class="ucs-login-panel">
+        <div class="ucs-login-brand">
+            <h1>@_siteName</h1>
+        </div>
+
+        <div class="ucs-login-card">
+            @* 浮动提示：锚定在卡片内编辑框上方，不占据布局空间 *@
+            <UcsNotice Placement="anchor"
+                       Kind="@(_error is not null ? "error" : "warning")"
+                       Message="@(_error ?? (_sessionExpired ? "登录状态已失效，请重新登录。" : null))" />
+
+            @* 使用原生 form 以获得 Enter 提交能力 *@
+            <form class="ucs-login-form" @onsubmit="SubmitAsync" @onsubmit:preventDefault>
+                <div class="ucs-field">
+                    <label class="ucs-field-label" for="ucs-account">账号</label>
+                    <Input Id="ucs-account" @bind-Value="_account" Placeholder="用户名或邮箱" Disabled="_submitting" />
+                </div>
+
+                <div class="ucs-field">
+                    <label class="ucs-field-label" for="ucs-password">密码</label>
+                    <InputPassword Id="ucs-password" @bind-Value="_password" Placeholder="登录密码" Disabled="_submitting" />
+                </div>
+
+                <button type="submit" class="ucs-login-submit" disabled="@_submitting">
+                    @if (_submitting)
+                    {
+                        <span class="ucs-spinner" aria-hidden="true"></span>
+                        <span>登录中…</span>
+                    }
+                    else
+                    {
+                        <span>登 录</span>
+                    }
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "returnUrl")] public string? ReturnUrl { get; set; }
+
+    [SupplyParameterFromQuery(Name = "expired")] public string? Expired { get; set; }
+
+    private string _account = string.Empty;
+    private string _password = string.Empty;
+    private string? _error;
+    private bool _submitting;
+    private bool _sessionExpired;
+
+    /// <summary>登录页标题：显示站点信息中的站点名称（获取失败时回落到默认标题）。</summary>
+    private string _siteName = "UCS 管理控制台";
+
+    protected override async Task OnInitializedAsync()
+    {
+        _sessionExpired = Expired == "1";
+        await EnsureSiteInfoLoadedAsync();
+    }
+
+    private async Task EnsureSiteInfoLoadedAsync()
+    {
+        try
+        {
+            var result = await Api.GetAsync<SystemInfoResponse>("/api/system/info");
+            if (result.Success && result.Data is { } info && !string.IsNullOrWhiteSpace(info.SiteName))
+            {
+                _siteName = info.SiteName;
+            }
+        }
+        catch
+        {
+            // 站点信息不可用时保留默认标题，不影响登录
+        }
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (_submitting)
+        {
+            return;
+        }
+
+        _error = null;
+        _sessionExpired = false;
+
+        if (string.IsNullOrWhiteSpace(_account) || string.IsNullOrWhiteSpace(_password))
+        {
+            _error = "请输入账号与密码";
+            return;
+        }
+
+        _submitting = true;
+        try
+        {
+            var result = await Api.LoginAsync(_account.Trim(), _password);
+            if (!result.Success)
+            {
+                _error = result.Message;
+                return;
+            }
+
+            // 登录成功后加载有效权限，再进入控制台
+            Permissions.Clear();
+            var permissions = await Api.GetEffectivePermissionsAsync();
+            if (permissions.Success && permissions.Data is { } data)
+            {
+                // ⚠️ 必须一并带上 Level：Set 的 level 参数默认为 NoGroup，
+                // 漏传会让 Permissions.Loaded 变 true 但 Level 仍是 int.MaxValue，
+                // 于是所有 CanManageGroup/CanManageUser 判定恒为 false（按钮全灰），
+                // 且 MainLayout 因 Loaded==true 提前返回、永不修正
+                Permissions.Set(data.Codes, data.Level);
+            }
+
+            var target = string.IsNullOrWhiteSpace(ReturnUrl) || !ReturnUrl.StartsWith('/') ? "/" : ReturnUrl;
+            Navigation.NavigateTo(target, replace: true);
+        }
+        catch (Exception ex)
+        {
+            _error = $"登录失败：{ex.Message}";
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+}

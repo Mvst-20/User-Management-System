@@ -1,97 +1,92 @@
-using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
 
 namespace UserManagementSystem.DTOs;
 
 // ============ 请求 DTOs ============
+// 注意：Minimal API (.NET 8) 默认不执行 DataAnnotations 验证，请求校验在端点/业务层进行
 
 public record RegisterRequest(
-    [Required(ErrorMessage = "用户名不能为空")]
-    [StringLength(64, MinimumLength = 3, ErrorMessage = "用户名长度为3-64个字符")]
     string Username,
-
-    [Required(ErrorMessage = "邮箱不能为空")]
-    [EmailAddress(ErrorMessage = "邮箱格式不正确")]
-    [StringLength(128, ErrorMessage = "邮箱长度不能超过128个字符")]
     string Email,
-
-    [Required(ErrorMessage = "密码不能为空")]
-    [StringLength(128, MinimumLength = 8, ErrorMessage = "密码长度为8-128个字符")]
     string Password,
-
     JsonElement? Extras = null
 );
 
 public record LoginRequest(
-    [Required(ErrorMessage = "登录名不能为空")]
     string Login,
-
-    [Required(ErrorMessage = "密码不能为空")]
     string Password
 );
 
 public record ChangePasswordRequest(
-    [Required(ErrorMessage = "当前密码不能为空")]
     string CurrentPassword,
-
-    [Required(ErrorMessage = "新密码不能为空")]
-    [StringLength(128, MinimumLength = 8, ErrorMessage = "新密码长度为8-128个字符")]
     string NewPassword
 );
 
 public record ChangeEmailRequest(
-    [Required(ErrorMessage = "新邮箱不能为空")]
-    [EmailAddress(ErrorMessage = "邮箱格式不正确")]
     string NewEmail,
-
-    [Required(ErrorMessage = "密码不能为空")]
     string Password
 );
 
 public record UpdateUserRequest(
-    [StringLength(64, MinimumLength = 3, ErrorMessage = "用户名长度为3-64个字符")]
     string? Username = null,
-
-    [EmailAddress(ErrorMessage = "邮箱格式不正确")]
     string? Email = null,
-
-    [StringLength(20, ErrorMessage = "手机号长度不能超过20个字符")]
     string? Phone = null,
+    JsonElement? Extras = null,
 
-    JsonElement? Extras = null
+    /// <summary>用户状态：1=正常、2=封禁、3=未验证。仅管理员可修改（不允许改自己）。</summary>
+    int? Status = null,
+
+    /// <summary>是否隐藏关注列表。</summary>
+    bool? IsFollowingListHidden = null
 );
 
 public record PatchUserRequest(
-    [StringLength(64, MinimumLength = 3, ErrorMessage = "用户名长度为3-64个字符")]
     string? Username = null,
-
-    [StringLength(20, ErrorMessage = "手机号长度不能超过20个字符")]
     string? Phone = null,
+    JsonElement? Extras = null,
 
-    JsonElement? Extras = null
+    /// <summary>用户状态：1=正常、2=封禁、3=未验证。仅管理员可修改（不允许改自己）。</summary>
+    int? Status = null,
+
+    /// <summary>是否隐藏关注列表。</summary>
+    bool? IsFollowingListHidden = null
 );
 
 public record ResendVerificationRequest(
-    [Required(ErrorMessage = "邮箱不能为空")]
-    [EmailAddress(ErrorMessage = "邮箱格式不正确")]
     string Email
 );
 
+/// <summary>
+/// 管理员创建用户请求。密码留空时由服务端生成并一次性返回。
+/// </summary>
+public record AdminCreateUserRequest(
+    string Username,
+    string Email,
+    string? Password = null,
+    string? Phone = null,
+
+    /// <summary>是否需要完成邮箱验证后才能登录；默认 false（创建后即可登录）。</summary>
+    bool RequireEmailVerification = false,
+
+    /// <summary>初始权限组；受操作者权限级别约束（只能分配级别更低的组）。</summary>
+    List<ulong>? GroupIds = null
+);
+
+/// <summary>管理员创建用户结果；仅在服务端生成密码时返回明文。</summary>
+public record AdminCreateUserResponse(
+    ulong Id,
+    string Username,
+    string Email,
+    string? GeneratedPassword
+);
+
 public record RefreshTokenRequest(
-    [Required(ErrorMessage = "Refresh Token 不能为空")]
     string RefreshToken
 );
 
 public record SendEmailRequest(
-    [Required(ErrorMessage = "收件人不能为空")]
-    [EmailAddress(ErrorMessage = "邮箱格式不正确")]
     string To,
-
-    [Required(ErrorMessage = "主题不能为空")]
-    [StringLength(256, ErrorMessage = "主题长度不能超过256个字符")]
     string Subject,
-
-    [Required(ErrorMessage = "正文不能为空")]
     string Body
 );
 
@@ -108,7 +103,16 @@ public record UserResponse(
     DateTime? LastLoginAt,
     DateTime CreatedAt,
     DateTime? EmailVerifiedAt,
-    JsonElement? Extras
+    JsonElement? Extras,
+
+    /// <summary>是否隐藏自己的关注列表。</summary>
+    bool IsFollowingListHidden = false,
+
+    /// <summary>
+    /// 用户的最高权限级别（所属权限组中数值最小的 level，<strong>数值越小权限越高</strong>）。
+    /// 前端据此判断能否操作该用户；真正的校验仍在服务端。
+    /// </summary>
+    int PrivilegeLevel = PermissionCodes.GroupLevel.NoGroup
 );
 
 public record LoginDataResponse(
@@ -123,10 +127,6 @@ public record LoginDataResponse(
 public record RegisterDataResponse(
     string Email,
     bool EmailSent
-);
-
-public record AvatarDataResponse(
-    string AvatarUrl
 );
 
 public record AvatarUploadDataResponse(
@@ -147,4 +147,38 @@ public record ServerStatusResponse(
     DateTime ServerTime,
     string DatabaseStatus,
     string Version
+);
+
+// ============ 管理前端支撑 DTOs ============
+
+/// <summary>
+/// 当前登录用户的"有效权限码"集合（已展开 A/B/C 特殊权限的覆盖效果）。
+/// 供管理前端控制菜单与按钮显隐；实际鉴权仍由端点权限过滤器执行。
+/// </summary>
+public record MyPermissionsResponse(
+    ulong UserId,
+    List<string> Codes,
+
+    /// <summary>
+    /// 当前用户的最高权限级别（所属权限组中数值最小的 level，<strong>数值越小权限越高</strong>）。
+    /// 前端据此判断"能否管理某个用户/权限组"；真正的校验仍在服务端。
+    /// </summary>
+    int Level = PermissionCodes.GroupLevel.NoGroup
+);
+
+/// <summary>
+/// 管理员重置指定用户密码请求。
+/// <see cref="NewPassword"/> 为空时由服务端生成随机密码并一次性返回。
+/// </summary>
+public record ResetPasswordRequest(
+    string? NewPassword = null
+);
+
+/// <summary>
+/// 管理员重置密码结果。仅在服务端生成密码时返回明文（此后再无法获取）。
+/// </summary>
+public record ResetPasswordResponse(
+    ulong UserId,
+    string Username,
+    string? GeneratedPassword
 );

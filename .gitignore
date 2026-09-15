@@ -364,3 +364,12 @@ FodyWeavers.xsd
 /appsettings.json
 /IHS_README.md
 /appsettings.json
+
+# Data Protection 密钥目录
+/keys/
+
+# 本地 IDE / AI 助手数据
+/.codebuddy/
+
+# 运行时上传的用户头像
+/wwwroot/avatars/

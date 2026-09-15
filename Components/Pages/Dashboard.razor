@@ -1,0 +1,232 @@
+@page "/"
+@attribute [Authorize]
+
+@inject UcsApiClient Api
+@inject PermissionState Permissions
+
+<PageTitle>仪表盘 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="仪表盘" OnRefresh="LoadAsync" RefreshLoading="_loading">
+    @* 统计周期是本页全局筛选（指标卡与两张折线图都跟随），因此放在页级操作区，
+       而不是塞进某一张图表的卡片头部 *@
+    <Actions>
+        <div class="ucs-btn-group">
+            @foreach (var option in DayOptions)
+            {
+                <Button Type="@(_days == option ? ButtonType.Primary : ButtonType.Default)"
+                        OnClick="@(() => ChangeDaysAsync(option))">
+                    近 @option 天
+                </Button>
+            }
+        </div>
+    </Actions>
+
+    <ChildContent>
+    <PermissionGate Code="@PermissionCodes.AdminStats">
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+
+        <div class="ucs-dashboard">
+            <div class="ucs-dashboard-main">
+                <div class="ucs-stat-grid">
+                    <div class="ucs-stat-card">
+                        <div class="ucs-stat-body">
+                            <div class="ucs-stat-label">总用户数</div>
+                            <div class="ucs-stat-value">@(_totalUsers?.ToString() ?? "-")</div>
+                        </div>
+                    </div>
+
+                    <div class="ucs-stat-card">
+                        <div class="ucs-stat-body">
+                            <div class="ucs-stat-label">当前在线</div>
+                            <div class="ucs-stat-value">@(_onlineUsers?.ToString() ?? "-")</div>
+                        </div>
+                    </div>
+
+                    <div class="ucs-stat-card">
+                        <div class="ucs-stat-body">
+                            <div class="ucs-stat-label">近 @_days 天新增</div>
+                            <div class="ucs-stat-value">@(_newUsers?.ToString() ?? "-")</div>
+                            <div class="ucs-stat-hint">@_rangeHint</div>
+                        </div>
+                    </div>
+
+                    <div class="ucs-stat-card">
+                        <div class="ucs-stat-body">
+                            <div class="ucs-stat-label">近 @_days 天活跃</div>
+                            <div class="ucs-stat-value">@(_activeUsers?.ToString() ?? "-")</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ucs-chart-row">
+                    <Card Bordered="false">
+                        <div class="ucs-block-head">
+                            <h2 class="ucs-block-title">用户规模趋势</h2>
+                        </div>
+
+                        <UcsLineChart Labels="_trendLabels"
+                                      Series="_scaleSeries"
+                                      Height="130"
+                                      AriaLabel="@($"近 {_days} 天用户规模趋势")" />
+                        @if (_trendHint is not null)
+                        {
+                            <div class="ucs-chart-footnote">@_trendHint</div>
+                        }
+                    </Card>
+
+                    <Card Bordered="false">
+                        <div class="ucs-block-head">
+                            <h2 class="ucs-block-title">活跃与在线趋势</h2>
+                        </div>
+
+                        <UcsLineChart Labels="_trendLabels"
+                                      Series="_activitySeries"
+                                      Height="130"
+                                      AriaLabel="@($"近 {_days} 天活跃与在线趋势")" />
+                    </Card>
+                </div>
+            </div>
+
+            <div class="ucs-dashboard-side">
+                <Card Bordered="false">
+                    <div class="ucs-block-head">
+                        <h2 class="ucs-block-title">快速开始</h2>
+                    </div>
+
+                    <div class="ucs-quick-list">
+                        @foreach (var entry in QuickEntries.Where(e => Permissions.Has(e.Permission)))
+                        {
+                            <a class="ucs-quick-item" href="@entry.Href">
+                                <span class="ucs-quick-icon"><UiIcon Name="@entry.Icon" /></span>
+                                <span class="ucs-quick-meta">
+                                    <span class="ucs-quick-label">@entry.Label</span>
+                                    <span class="ucs-quick-desc">@entry.Description</span>
+                                </span>
+                                <span class="ucs-quick-arrow"><UiIcon Name="chevron-right" Size="14" /></span>
+                            </a>
+                        }
+                    </div>
+                </Card>
+            </div>
+        </div>
+    </PermissionGate>
+
+    <PermissionGate Code="@PermissionCodes.AdminStats" Inverse="true">
+        <Card Bordered="false">
+            <Alert Type="@AlertType.Info" ShowIcon="true" Message="无统计权限（admin:stats）。" />
+        </Card>
+    </PermissionGate>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private static readonly int[] DayOptions = { 7, 30, 90 };
+
+    /// <summary>「快速开始」常用入口（按当前账号权限过滤显示）。</summary>
+    private static readonly (string Label, string Description, string Href, string Icon, string Permission)[] QuickEntries =
+    {
+        ("用户管理", "账号、资料与封禁", "/users", "users", PermissionCodes.UserList),
+        ("权限组", "权限组与成员分配", "/user-groups", "layers", PermissionCodes.UserGroupRead),
+        ("权限", "权限码与来源", "/permissions", "key-round", PermissionCodes.PermissionRead),
+        ("系统设置", "站点信息与开关", "/settings", "settings", PermissionCodes.SystemSettingRead),
+        ("邮件服务", "SMTP 配置", "/settings/smtp", "mail", PermissionCodes.SmtpRead),
+        ("子系统", "接入方与凭证", "/subsystems", "box", PermissionCodes.SubsystemRead),
+        ("运行日志", "实时运行日志", "/logs", "terminal", PermissionCodes.AdminServer),
+        ("服务器状态", "CPU / 内存 / 网络", "/server", "activity", PermissionCodes.AdminServer)
+    };
+
+    private bool _loading;
+    private string? _error;
+
+    private int _days = 7;
+    private int? _totalUsers;
+    private int? _onlineUsers;
+    private int? _newUsers;
+    private int? _activeUsers;
+    private string? _rangeHint;
+
+    private string[] _trendLabels = Array.Empty<string>();
+    private IReadOnlyList<UcsLineSeries> _scaleSeries = Array.Empty<UcsLineSeries>();
+    private IReadOnlyList<UcsLineSeries> _activitySeries = Array.Empty<UcsLineSeries>();
+    private string? _trendHint;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task ChangeDaysAsync(int days)
+    {
+        _days = days;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var total = await Api.GetAsync<TotalUsersData>("/api/admin/stats/total-users");
+            if (total.Success && total.Data is { } totalData)
+            {
+                _totalUsers = totalData.TotalUsers;
+            }
+            else
+            {
+                _error = total.Message;
+            }
+
+            var online = await Api.GetAsync<OnlineUsersData>("/api/admin/stats/online-users");
+            if (online.Success && online.Data is { } onlineData)
+            {
+                _onlineUsers = onlineData.OnlineUsers;
+            }
+
+            var created = await Api.GetAsync<NewUsersData>($"/api/admin/stats/new-users?days={_days}");
+            if (created.Success && created.Data is { } createdData)
+            {
+                _newUsers = createdData.NewUsers;
+                _rangeHint = $"{createdData.StartDate} ~ {createdData.EndDate}";
+            }
+
+            var active = await Api.GetAsync<ActiveUsersData>($"/api/admin/stats/active-users?days={_days}");
+            if (active.Success && active.Data is { } activeData)
+            {
+                _activeUsers = activeData.ActiveUsers;
+            }
+
+            var daily = await Api.GetAsync<NewUsersDailyData>($"/api/admin/stats/new-users/daily?days={_days}");
+            if (daily.Success && daily.Data is { } dailyData)
+            {
+                // X 轴用短标签（MM-dd），悬浮 title 展示完整日期
+                _trendLabels = dailyData.Items
+                    .Select(item => item.Date.Length >= 10 ? item.Date[5..] : item.Date)
+                    .ToArray();
+
+                // 图一（用户规模）：总用户（累计）+ 新增 + 注销（注销用红色区分）
+                _scaleSeries = new List<UcsLineSeries>
+                {
+                    new("总用户数", dailyData.Items.Select(item => (double?)item.TotalUsers).ToArray()),
+                    new("新增用户", dailyData.Items.Select(item => (double?)item.NewUsers).ToArray()),
+                    new("注销用户", dailyData.Items.Select(item => (double?)item.DeletedUsers).ToArray(), "#DC2626")
+                };
+
+                // 图二（活跃与在线）：活跃（当日登录近似）+ 当前在线（快照横线，绿色）
+                _activitySeries = new List<UcsLineSeries>
+                {
+                    new("活跃用户", dailyData.Items.Select(item => (double?)item.ActiveUsers).ToArray()),
+                    new("当前在线", Enumerable.Repeat<double?>(dailyData.OnlineUsers, dailyData.Items.Count).ToArray(), "#16A34A")
+                };
+
+                _trendHint = $"{dailyData.StartDate} ~ {dailyData.EndDate}";
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载统计数据失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+}

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using UserManagementSystem.Data;
 using UserManagementSystem.DTOs;
+using UserManagementSystem.Exceptions;
 using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Services;
@@ -20,25 +21,23 @@ public class FollowService : IFollowService
     {
         if (followerId == followingId)
         {
-            throw new InvalidOperationException("不能关注自己");
+            throw new BusinessException(ResultCodes.Error, "不能关注自己");
         }
 
-        // 检查目标用户是否存在且状态正常
         var targetUser = await _context.Users
             .FirstOrDefaultAsync(u => u.Id == followingId && u.Status != UserStatus.Deleted);
 
         if (targetUser == null)
         {
-            throw new KeyNotFoundException("用户不存在");
+            throw new BusinessException(ResultCodes.NotFound, "用户不存在", StatusCodes.Status404NotFound);
         }
 
-        // 检查是否已关注
         var existingFollow = await _context.UserFollows
             .FirstOrDefaultAsync(f => f.FollowerId == followerId && f.FollowingId == followingId);
 
         if (existingFollow != null)
         {
-            throw new InvalidOperationException("已经关注了该用户");
+            throw new BusinessException(ResultCodes.Error, "已经关注了该用户");
         }
 
         var follow = new UserFollow
@@ -88,15 +87,20 @@ public class FollowService : IFollowService
 
     public async Task<FollowListResponse> GetFollowingListAsync(ulong userId, int page, int pageSize, ulong? currentUserId = null)
     {
-        // 检查关注列表可见性
+        // 检查关注列表可见性（可空投影区分"用户不存在"与"未隐藏"）
         if (currentUserId != userId)
         {
             var isHidden = await _context.Users
-                .Where(u => u.Id == userId)
-                .Select(u => u.IsFollowingListHidden)
+                .Where(u => u.Id == userId && u.Status != UserStatus.Deleted)
+                .Select(u => (bool?)u.IsFollowingListHidden)
                 .FirstOrDefaultAsync();
 
-            if (isHidden)
+            if (isHidden == null)
+            {
+                throw new BusinessException(ResultCodes.NotFound, "资源不存在", StatusCodes.Status404NotFound);
+            }
+
+            if (isHidden.Value)
             {
                 return new FollowListResponse(new List<FollowListItem>(), 0, page, pageSize);
             }
@@ -179,9 +183,16 @@ public class FollowService : IFollowService
 
     public async Task<bool> GetFollowingListVisibilityAsync(ulong userId)
     {
-        return await _context.Users
+        var isHidden = await _context.Users
             .Where(u => u.Id == userId)
-            .Select(u => u.IsFollowingListHidden)
+            .Select(u => (bool?)u.IsFollowingListHidden)
             .FirstOrDefaultAsync();
+
+        if (isHidden == null)
+        {
+            throw new BusinessException(ResultCodes.NotFound, "资源不存在", StatusCodes.Status404NotFound);
+        }
+
+        return isHidden.Value;
     }
 }

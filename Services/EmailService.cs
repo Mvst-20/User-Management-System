@@ -1,29 +1,48 @@
 using MailKit.Net.Smtp;
+using MailKit.Security;
 using MimeKit;
 using UserManagementSystem.Configuration;
+using UserManagementSystem.DTOs;
+using UserManagementSystem.Exceptions;
 
 namespace UserManagementSystem.Services;
 
+/// <summary>
+/// 邮件发送服务。
+/// SMTP 连接参数来自数据库配置（<see cref="ISmtpConfigService"/>），改动即时生效；
+/// <see cref="AppConfiguration"/> 仅用于站点地址与验证链接有效期。
+/// </summary>
 public class EmailService : IEmailService
 {
     private readonly AppConfiguration _config;
+    private readonly ISmtpConfigService _smtpConfigService;
     private readonly ILogger<EmailService> _logger;
 
-    public EmailService(AppConfiguration config, ILogger<EmailService> logger)
+    public EmailService(
+        AppConfiguration config,
+        ISmtpConfigService smtpConfigService,
+        ILogger<EmailService> logger)
     {
         _config = config;
+        _smtpConfigService = smtpConfigService;
         _logger = logger;
     }
 
     public async Task SendEmailAsync(string to, string subject, string htmlBody)
     {
+        var options = await _smtpConfigService.GetEffectiveAsync();
+        if (options is null)
+        {
+            _logger.LogWarning("Skip sending email to {Recipient}: SMTP is not configured or disabled", to);
+            throw new BusinessException(ResultCodes.EmailSendFail, "邮件服务未配置或已停用，请先在管理后台完成邮件服务配置");
+        }
+
         try
         {
             var message = new MimeMessage();
             message.From.Add(new MailboxAddress(
-                _config.Smtp.FromName ?? "User Management System",
-                _config.Smtp.From
-            ));
+                string.IsNullOrWhiteSpace(options.FromName) ? "User Management System" : options.FromName,
+                options.FromAddress));
             message.To.Add(MailboxAddress.Parse(to));
             message.Subject = subject;
 
@@ -34,20 +53,20 @@ public class EmailService : IEmailService
             message.Body = bodyBuilder.ToMessageBody();
 
             using var client = new SmtpClient();
-            
-            // 根据端口自动选择连接方式
-            var secureSocketOptions = _config.Smtp.Port switch
-            {
-                465 => MailKit.Security.SecureSocketOptions.SslOnConnect,
-                587 => MailKit.Security.SecureSocketOptions.StartTls,
-                _ => _config.Smtp.UseSsl ? MailKit.Security.SecureSocketOptions.SslOnConnect : MailKit.Security.SecureSocketOptions.StartTls
-            };
-            
-            await client.ConnectAsync(_config.Smtp.Host, _config.Smtp.Port, secureSocketOptions);
 
-            if (!string.IsNullOrEmpty(_config.Smtp.Username))
+            // 保持既有行为：465 → SSL 直连；587 → STARTTLS；其他端口按配置
+            var secureSocketOptions = options.Port switch
             {
-                await client.AuthenticateAsync(_config.Smtp.Username, _config.Smtp.Password);
+                465 => SecureSocketOptions.SslOnConnect,
+                587 => SecureSocketOptions.StartTls,
+                _ => options.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls
+            };
+
+            await client.ConnectAsync(options.Host, options.Port, secureSocketOptions);
+
+            if (!string.IsNullOrEmpty(options.Username))
+            {
+                await client.AuthenticateAsync(options.Username, options.Password);
             }
 
             await client.SendAsync(message);
@@ -58,7 +77,7 @@ public class EmailService : IEmailService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to send email to {Recipient}", to);
-            throw new InvalidOperationException($"Failed to send email: {ex.Message}", ex);
+            throw new BusinessException(ResultCodes.EmailSendFail, $"邮件发送失败：{ex.Message}");
         }
     }
 
@@ -73,7 +92,7 @@ public class EmailService : IEmailService
         {
             subject = "Confirm Email Change";
             var verifyUrl = $"{_config.AppSettings.ApiBaseUrl}/api/users/verify-email-change?token={token}";
-            
+
             htmlBody = $@"<!DOCTYPE html>
 <html><head><meta charset=""utf-8""></head>
 <body style=""font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;"">
@@ -91,7 +110,7 @@ public class EmailService : IEmailService
         {
             subject = "Email Verification";
             var verifyUrl = $"{_config.AppSettings.ApiBaseUrl}/api/users/verify-email?token={token}";
-            
+
             htmlBody = $@"<!DOCTYPE html>
 <html><head><meta charset=""utf-8""></head>
 <body style=""font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;"">

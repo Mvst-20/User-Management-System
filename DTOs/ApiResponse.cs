@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace UserManagementSystem.DTOs;
@@ -40,20 +39,6 @@ public class ApiResponse
         Message = message;
         Data = data;
     }
-
-    // ============ 静态工厂方法 ============
-
-    public static ApiResponse Success(string message = "操作成功", object? data = null) =>
-        new(ResultCodes.Success, message, data);
-
-    public static ApiResponse Success(int code, string message, object? data = null) =>
-        new(code, message, data);
-
-    public static ApiResponse Error(int code, string message) =>
-        new(code, message);
-
-    public static ApiResponse Error(string message) =>
-        new(ResultCodes.Error, message);
 }
 
 /// <summary>
@@ -90,10 +75,4 @@ public class PagedApiResponse
         TotalCount = totalCount;
         TotalPages = (int)Math.Ceiling((double)totalCount / pageSize);
     }
-}
-
-[JsonSerializable(typeof(ApiResponse))]
-[JsonSerializable(typeof(PagedApiResponse))]
-internal partial class AppJsonSerializerContext : JsonSerializerContext
-{
 }

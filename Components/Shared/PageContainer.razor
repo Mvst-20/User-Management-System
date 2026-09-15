@@ -1,0 +1,49 @@
+@* 页面容器：标题与刷新按钮提升到顶栏，其余操作按钮留在页面顶部 *@
+@inject PageHeaderService PageHeader
+
+<div class="ucs-page @CssClass">
+    @if (Actions is not null)
+    {
+        <div class="ucs-page-actions-bar">@Actions</div>
+    }
+
+    <div class="ucs-page-body">
+        @ChildContent
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+
+    /// <summary>页面内的其余操作按钮（新建/添加等），渲染在页面顶部，不进顶栏。</summary>
+    [Parameter] public RenderFragment? Actions { get; set; }
+
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    /// <summary>刷新回调；提供后在顶栏右侧渲染图标刷新按钮。</summary>
+    [Parameter] public EventCallback OnRefresh { get; set; }
+
+    /// <summary>刷新进行中（顶栏图标按钮显示加载态）。</summary>
+    [Parameter] public bool RefreshLoading { get; set; }
+
+    /// <summary>页面内容自适应视口高度（运行日志等长列表页面）。</summary>
+    [Parameter] public bool FitViewport { get; set; }
+
+    private string CssClass => FitViewport ? "ucs-page-fit" : string.Empty;
+
+    protected override void OnParametersSet()
+        => PageHeader.Set(Title, BuildHeaderActions());
+
+    /// <summary>顶栏操作区当前仅含刷新图标按钮。</summary>
+    private RenderFragment BuildHeaderActions() => __builder =>
+    {
+        if (OnRefresh.HasDelegate)
+        {
+            <Tooltip Title="刷新">
+                <Button Type="@ButtonType.Text" OnClick="@(async _ => await OnRefresh.InvokeAsync())" Loading="RefreshLoading">
+                    <UiIcon Name="refresh-cw" />
+                </Button>
+            </Tooltip>
+        }
+    };
+}

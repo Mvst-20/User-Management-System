@@ -1,0 +1,864 @@
+@page "/users"
+@attribute [Authorize]
+@implements IDisposable
+@using System.Text.Json
+
+@inject UcsApiClient Api
+@inject TokenStore Tokens
+@inject PermissionState Permissions
+
+<PageTitle>用户管理 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="用户管理" OnRefresh="ReloadAsync" RefreshLoading="_loading">
+    <Actions>
+        <PermissionGate Code="@PermissionCodes.UserCreate">
+            <Button Type="@ButtonType.Primary" OnClick="OpenCreateAsync">添加用户</Button>
+        </PermissionGate>
+    </Actions>
+
+    <ChildContent>
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+        <UcsNotice Message="@_modalError" Kind="error" OnDismiss="@(() => _modalError = null)" />
+
+        <Card Bordered="false">
+            <div class="ucs-filter-bar">
+                <div class="ucs-filter-item">
+                    <span class="ucs-filter-label">关键词</span>
+                    <Input @bind-Value="_search" Placeholder="用户名或邮箱" />
+                </div>
+                <div class="ucs-filter-item">
+                    <span class="ucs-filter-label">状态</span>
+                    <select class="ucs-native-select" @bind="_status">
+                        <option value="">全部（不含已删除）</option>
+                        <option value="1">正常</option>
+                        <option value="2">封禁</option>
+                        <option value="3">未验证</option>
+                        <option value="4">已删除</option>
+                    </select>
+                </div>
+                <div class="ucs-filter-actions">
+                    <Button Type="@ButtonType.Primary" OnClick="SearchAsync">查询</Button>
+                    <Button OnClick="ResetFiltersAsync">重置</Button>
+                </div>
+            </div>
+        </Card>
+
+        <Card Bordered="false">
+            <Table TItem="UserResponse"
+                   DataSource="_users"
+                   Total="_totalCount"
+                   PageIndex="_page"
+                   PageIndexChanged="OnPageIndexChanged"
+                   PageSize="_pageSize"
+                   PageSizeChanged="OnPageSizeChanged"
+                   Loading="_loading"
+                   Bordered="false"
+                   Striped="true">
+                <PropertyColumn Title="ID" Property="c => c.Id" />
+                <PropertyColumn Title="用户名" Property="c => c.Username" />
+                <PropertyColumn Title="邮箱" Property="c => c.Email" />
+                <PropertyColumn Title="手机号" Property="c => c.Phone" />
+                <Column TData="UserResponse" Title="状态">
+                    <span class="ucs-chip @StatusChipClass(context.Status)">@StatusText(context.Status)</span>
+                </Column>
+                <Column TData="UserResponse" Title="最后登录">@FormatTime(context.LastLoginAt)</Column>
+                <Column TData="UserResponse" Title="注册时间">@FormatTime(context.CreatedAt)</Column>
+                <Column TData="UserResponse" Title="操作">
+                    <Space>
+                        <PermissionGate Code="@PermissionCodes.UserUpdate">
+                            <Button OnClick="@(() => OpenEditAsync(context))" Disabled="@(!CanOperate(context))">编辑</Button>
+                        </PermissionGate>
+                        <PermissionGate Code="@PermissionCodes.UserGroupManageMembers">
+                            <Button OnClick="@(() => OpenGroupsAsync(context))" Disabled="@(!CanAssignGroups(context))">权限组</Button>
+                        </PermissionGate>
+                        <PermissionGate Code="@PermissionCodes.UserResetPassword">
+                            <Button OnClick="@(() => OpenResetAsync(context))" Disabled="@(!CanOperate(context))">重置密码</Button>
+                        </PermissionGate>
+                        <PermissionGate Code="@PermissionCodes.UserDelete">
+                            <Popconfirm Title="@DeleteConfirmText(context)"
+                                        OnConfirm="@(_ => DeleteAsync(context))">
+                                <Button Danger="true" Disabled="@(!CanDelete(context))">删除</Button>
+                            </Popconfirm>
+                        </PermissionGate>
+                    </Space>
+                </Column>
+            </Table>
+        </Card>
+
+        @* ============ 添加用户 ============ *@
+        <Modal Title="添加用户"
+               Visible="_createVisible"
+               ConfirmLoading="_saving"
+               OnOk="@(_ => CreateUserAsync())"
+               OnCancel="@(_ => _createVisible = false)"
+               DestroyOnClose="true">
+            <div class="ucs-form">
+                <div class="ucs-field">
+                    <label class="ucs-field-label">用户名</label>
+                    <Input @bind-Value="_createUsername" Placeholder="3-64 字符" />
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">邮箱</label>
+                    <Input @bind-Value="_createEmail" />
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">密码</label>
+                    <Input @bind-Value="_createPassword" Placeholder="留空则自动生成随机密码" />
+                    <span class="ucs-field-hint">8-128 字符；留空由服务端生成，生成后仅显示一次</span>
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">手机号</label>
+                    <Input @bind-Value="_createPhone" Placeholder="可留空" />
+                </div>
+                <div class="ucs-field">
+                    <Checkbox Checked="_createRequireEmailVerification"
+                              CheckedChanged="@(isChecked => _createRequireEmailVerification = isChecked)">
+                        需完成邮箱验证后才能登录
+                    </Checkbox>
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">初始权限组</label>
+                    @if (_createGroups.Count == 0)
+                    {
+                        <span class="ucs-field-hint">没有可分配的权限组</span>
+                    }
+                    else
+                    {
+                        @foreach (var group in _createGroups)
+                        {
+                            <div class="ucs-checkbox-row">
+                                <Checkbox Checked="_createGroupIds.Contains(group.Id)"
+                                          Disabled="@(group.IsMemberLocked || !Permissions.CanManageGroup(group.Level))"
+                                          CheckedChanged="@(isChecked => ToggleCreateGroup(group.Id, isChecked))">
+                                    @group.Name
+                                </Checkbox>
+                                <span class="ucs-field-hint">级别 @group.Level</span>
+                            </div>
+                        }
+                    }
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(_createdPassword))
+                {
+                    <Alert Type="@AlertType.Success" ShowIcon="true"
+                           Message="@($"用户已创建，初始密码：{_createdPassword}")" />
+                }
+            </div>
+        </Modal>
+
+        @* ============ 编辑用户 ============ *@
+        <Modal Title="@($"编辑用户 · {_editing?.Username}")"
+               Visible="_editVisible"
+               ConfirmLoading="_saving"
+               OnOk="@(_ => SaveUserAsync())"
+               OnCancel="@(_ => _editVisible = false)"
+               DestroyOnClose="true">
+            @if (_editing is not null)
+            {
+                <div class="ucs-form">
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">用户名</label>
+                        <Input @bind-Value="_editUsername" />
+                    </div>
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">邮箱</label>
+                        <Input @bind-Value="_editEmail" />
+                    </div>
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">手机号</label>
+                        <Input @bind-Value="_editPhone" Placeholder="可留空" />
+                    </div>
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">状态</label>
+                        <select class="ucs-native-select" @bind="_editStatus" disabled="@IsSelfEditing">
+                            <option value="1">正常</option>
+                            <option value="2">封禁</option>
+                            <option value="3">未验证</option>
+                            @if (_editStatus == "4")
+                            {
+                                <option value="4">已删除</option>
+                            }
+                        </select>
+                        @if (IsSelfEditing)
+                        {
+                            <span class="ucs-field-hint">不能修改自己的账号状态</span>
+                        }
+                    </div>
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">头像</label>
+                        <div class="ucs-avatar-row">
+                            @if (!string.IsNullOrWhiteSpace(_editAvatarUrl))
+                            {
+                                <img class="ucs-avatar-preview" src="@_editAvatarUrl" alt="头像" />
+                            }
+                            else
+                            {
+                                <span class="ucs-avatar-placeholder">无</span>
+                            }
+
+                            <PermissionGate Code="@PermissionCodes.AvatarUpload">
+                                <InputFile OnChange="OnAvatarSelected"
+                                           accept=".jpg,.jpeg,.png,.gif,.webp"
+                                           class="ucs-input-file"
+                                           disabled="@_avatarBusy" />
+                            </PermissionGate>
+
+                            @if (!string.IsNullOrWhiteSpace(_editAvatarUrl))
+                            {
+                                <PermissionGate Code="@PermissionCodes.AvatarDelete">
+                                    <Button Danger="true" OnClick="DeleteAvatarAsync" Loading="_avatarBusy">删除头像</Button>
+                                </PermissionGate>
+                            }
+                        </div>
+                        <span class="ucs-field-hint">支持 jpg / png / gif / webp，单文件不超过 6MB</span>
+                    </div>
+                    <div class="ucs-field">
+                        <label class="ucs-field-label">扩展字段</label>
+                        <textarea class="ucs-native-textarea" @bind="_editExtras"
+                                  placeholder='JSON 格式，留空表示不修改。例如 {"dept":"研发部"}'></textarea>
+                    </div>
+                    <div class="ucs-field">
+                        <Checkbox Checked="_editFollowHidden"
+                                  CheckedChanged="@(isChecked => _editFollowHidden = isChecked)">
+                            隐藏关注列表
+                        </Checkbox>
+                    </div>
+                </div>
+            }
+        </Modal>
+
+        @* ============ 分配权限组 ============ *@
+        <Modal Title="@($"权限组分配 · {_editing?.Username}")"
+               Visible="_groupsVisible"
+               ConfirmLoading="_saving"
+               OnOk="@(_ => SaveGroupsAsync())"
+               OnCancel="@(_ => _groupsVisible = false)"
+               DestroyOnClose="true">
+            @if (_groupsLoading)
+            {
+                <div class="ucs-auth-loading"><Spin /></div>
+            }
+            else
+            {
+                <div class="ucs-form">
+                    @if (_allGroups.Count == 0)
+                    {
+                        <Alert Type="@AlertType.Info" ShowIcon="true" Message="没有可分配的权限组。" />
+                    }
+                    else
+                    {
+                        <span class="ucs-field-hint">保存将替换现有权限组</span>
+                        @foreach (var group in _allGroups)
+                        {
+                            <div class="ucs-checkbox-row">
+                                <Checkbox Checked="_selectedGroupIds.Contains(group.Id)"
+                                          Disabled="@group.IsMemberLocked"
+                                          CheckedChanged="@(isChecked => ToggleGroup(group.Id, isChecked))">
+                                    @group.Name
+                                </Checkbox>
+                                @if (group.IsMemberLocked)
+                                {
+                                    <span class="ucs-field-hint">受保护权限组，不可分配</span>
+                                }
+                            </div>
+                        }
+                    }
+                </div>
+            }
+        </Modal>
+
+        @* ============ 重置密码 ============ *@
+        <Modal Title="@($"重置密码 · {_editing?.Username}")"
+               Visible="_resetVisible"
+               ConfirmLoading="_saving"
+               OnOk="@(_ => ResetPasswordAsync())"
+               OnCancel="@(_ => _resetVisible = false)"
+               DestroyOnClose="true">
+            <div class="ucs-form">
+                <div class="ucs-field">
+                    <label class="ucs-field-label">新密码</label>
+                    <Input @bind-Value="_resetPassword" Placeholder="留空则自动生成随机密码" />
+                    <span class="ucs-field-hint">系统生成的密码仅显示一次</span>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(_generatedPassword))
+                {
+                    <Alert Type="@AlertType.Success" ShowIcon="true"
+                           Message="@($"新密码：{_generatedPassword}")" />
+                }
+            </div>
+        </Modal>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private List<UserResponse> _users = new();
+    private int _totalCount;
+    private int _page = 1;
+    private int _pageSize = 10;
+    private string _search = string.Empty;
+    private string _status = string.Empty;
+    private bool _loading;
+    private string? _error;
+
+    private UserResponse? _editing;
+    private bool _saving;
+    private string? _modalError;
+
+    private bool _editVisible;
+    private string _editUsername = string.Empty;
+    private string _editEmail = string.Empty;
+    private string _editPhone = string.Empty;
+    private string _editStatus = "1";
+    private string _editExtras = string.Empty;
+    private bool _editFollowHidden;
+    private string? _editAvatarUrl;
+    private bool _avatarBusy;
+
+    private bool _groupsVisible;
+    private bool _groupsLoading;
+    private List<UserGroupResponse> _allGroups = new();
+    private readonly HashSet<ulong> _selectedGroupIds = new();
+
+    private bool _resetVisible;
+    private string _resetPassword = string.Empty;
+    private string? _generatedPassword;
+
+    private bool _createVisible;
+    private string _createUsername = string.Empty;
+    private string _createEmail = string.Empty;
+    private string _createPassword = string.Empty;
+    private string _createPhone = string.Empty;
+    private bool _createRequireEmailVerification;
+    private List<UserGroupResponse> _createGroups = new();
+    private readonly HashSet<ulong> _createGroupIds = new();
+    private string? _createdPassword;
+
+    /// <summary>与服务端口径一致的头像大小上限（6MB）。</summary>
+    private const long MaxAvatarBytes = 6 * 1024 * 1024;
+
+    protected override void OnInitialized()
+    {
+        // 会话（SelfId）与权限级别均为异步就绪：若不订阅变更通知，
+        // 首次进入时表格行以上一轮"未就绪"状态渲染，所有操作按钮呈灰置且不会自动恢复
+        Tokens.Changed += OnStateReady;
+        Permissions.Changed += OnStateReady;
+    }
+
+    private void OnStateReady() => _ = InvokeAsync(StateHasChanged);
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    public void Dispose()
+    {
+        Tokens.Changed -= OnStateReady;
+        Permissions.Changed -= OnStateReady;
+    }
+
+    /// <summary>是否正在编辑自己：自己的账号状态不可修改。</summary>
+    private bool IsSelfEditing => _editing is not null && Tokens.Session?.UserId == _editing.Id;
+
+    /// <summary>自己的用户 ID。</summary>
+    private ulong? SelfId => Tokens.Session?.UserId;
+
+    /// <summary>
+    /// 能否对该用户执行写操作：uid=0 一律禁止；操作自己允许（受各自端点规则约束）；
+    /// 操作他人要求对方权限级别严格低于自己（数值更大）。
+    /// </summary>
+    private bool CanOperate(UserResponse user)
+        => user.Id != 0
+           && (SelfId == user.Id || user.PrivilegeLevel > Permissions.Level);
+
+    /// <summary>能否删除：不能删除自己，也不能删除权限级别不低于自己的用户。</summary>
+    private bool CanDelete(UserResponse user)
+        => user.Id != 0 && SelfId != user.Id && user.PrivilegeLevel > Permissions.Level;
+
+    /// <summary>能否分配权限组：不能修改自己的权限组，也不能操作权限级别不低于自己的用户。</summary>
+    private bool CanAssignGroups(UserResponse user)
+        => user.Id != 0 && SelfId != user.Id && user.PrivilegeLevel > Permissions.Level;
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var query = $"/api/users?page={_page}&pageSize={_pageSize}";
+            if (!string.IsNullOrWhiteSpace(_search))
+            {
+                query += $"&search={Uri.EscapeDataString(_search.Trim())}";
+            }
+
+            if (int.TryParse(_status, out var status))
+            {
+                query += $"&status={status}";
+            }
+
+            var result = await Api.GetPagedAsync<UserResponse>(query);
+            if (result.Success)
+            {
+                _users = result.Items.ToList();
+                _totalCount = result.TotalCount;
+            }
+            else
+            {
+                _users = new List<UserResponse>();
+                _totalCount = 0;
+                _error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载用户列表失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task ReloadAsync() => await LoadAsync();
+
+    private async Task OnPageIndexChanged(int page)
+    {
+        _page = page < 1 ? 1 : page;
+        await LoadAsync();
+    }
+
+    private async Task OnPageSizeChanged(int pageSize)
+    {
+        _pageSize = pageSize < 1 ? 10 : pageSize;
+        _page = 1;
+        await LoadAsync();
+    }
+
+    private async Task SearchAsync()
+    {
+        _page = 1;
+        await LoadAsync();
+    }
+
+    private async Task ResetFiltersAsync()
+    {
+        _search = string.Empty;
+        _status = string.Empty;
+        _page = 1;
+        await LoadAsync();
+    }
+
+    // ============ 添加用户 ============
+
+    private async Task OpenCreateAsync()
+    {
+        _createUsername = string.Empty;
+        _createEmail = string.Empty;
+        _createPassword = string.Empty;
+        _createPhone = string.Empty;
+        _createRequireEmailVerification = false;
+        _createdPassword = null;
+        _createGroupIds.Clear();
+        _modalError = null;
+        _error = null;
+        _createVisible = true;
+
+        var groups = await Api.GetPagedAsync<UserGroupResponse>("/api/user-groups?page=1&pageSize=100");
+        _createGroups = groups.Success
+            ? groups.Items.Where(g => !g.IsMemberLocked).ToList()
+            : new List<UserGroupResponse>();
+    }
+
+    private void ToggleCreateGroup(ulong groupId, bool selected)
+    {
+        if (selected)
+        {
+            _createGroupIds.Add(groupId);
+        }
+        else
+        {
+            _createGroupIds.Remove(groupId);
+        }
+    }
+
+    private async Task CreateUserAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_createUsername) || string.IsNullOrWhiteSpace(_createEmail))
+        {
+            _modalError = "请填写用户名与邮箱";
+            return;
+        }
+
+        _modalError = null;
+        _saving = true;
+
+        try
+        {
+            var body = new
+            {
+                username = _createUsername.Trim(),
+                email = _createEmail.Trim(),
+                password = string.IsNullOrWhiteSpace(_createPassword) ? null : _createPassword,
+                phone = string.IsNullOrWhiteSpace(_createPhone) ? null : _createPhone.Trim(),
+                requireEmailVerification = _createRequireEmailVerification,
+                groupIds = _createGroupIds.ToList()
+            };
+
+            var result = await Api.PostAsync<AdminCreateUserResponse>("/api/admin/users", body);
+            if (result.Success && result.Data is { } data)
+            {
+                _createdPassword = data.GeneratedPassword;
+                _createPassword = string.Empty;
+                await LoadAsync();
+            }
+            else
+            {
+                _modalError = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"创建失败：{ex.Message}";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // ============ 编辑 ============
+
+    private Task OpenEditAsync(UserResponse user)
+    {
+        _editing = user;
+        _editUsername = user.Username;
+        _editEmail = user.Email;
+        _editPhone = user.Phone ?? string.Empty;
+        _editStatus = user.Status.ToString();
+        _editFollowHidden = user.IsFollowingListHidden;
+        _editAvatarUrl = user.AvatarUrl;
+        _editExtras = user.Extras is { } extras && extras.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)
+            ? extras.GetRawText()
+            : string.Empty;
+        _modalError = null;
+        _error = null;
+        _editVisible = true;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveUserAsync()
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        _modalError = null;
+
+        JsonElement? extras = null;
+        if (!string.IsNullOrWhiteSpace(_editExtras))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(_editExtras);
+                extras = document.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                _modalError = "扩展字段不是合法的 JSON";
+                return;
+            }
+        }
+
+        _saving = true;
+        try
+        {
+            var body = new
+            {
+                username = string.IsNullOrWhiteSpace(_editUsername) ? null : _editUsername.Trim(),
+                email = string.IsNullOrWhiteSpace(_editEmail) ? null : _editEmail.Trim(),
+                phone = string.IsNullOrWhiteSpace(_editPhone) ? null : _editPhone.Trim(),
+                extras,
+                status = int.TryParse(_editStatus, out var status) ? status : (int?)null,
+                isFollowingListHidden = _editFollowHidden
+            };
+
+            var result = await Api.PutAsync<UserResponse>($"/api/users/{_editing.Id}", body);
+            if (result.Success)
+            {
+                _editVisible = false;
+                await LoadAsync();
+            }
+            else
+            {
+                _modalError = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"保存失败：{ex.Message}";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task OnAvatarSelected(InputFileChangeEventArgs args)
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        _modalError = null;
+        _avatarBusy = true;
+
+        try
+        {
+            var file = args.File;
+            await using var source = file.OpenReadStream(MaxAvatarBytes);
+            using var buffer = new MemoryStream();
+            await source.CopyToAsync(buffer);
+            buffer.Position = 0;
+
+            var result = await Api.PostFileAsync<AvatarUploadDataResponse>(
+                $"/api/users/{_editing.Id}/avatar", buffer, file.Name, contentType: file.ContentType);
+
+            if (result.Success && result.Data is { } data)
+            {
+                _editAvatarUrl = data.AvatarUrl;
+                await LoadAsync();
+            }
+            else
+            {
+                _modalError = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"头像上传失败：{ex.Message}";
+        }
+        finally
+        {
+            _avatarBusy = false;
+        }
+    }
+
+    private async Task DeleteAvatarAsync()
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        _modalError = null;
+        _avatarBusy = true;
+
+        try
+        {
+            var result = await Api.DeleteAsync<object>($"/api/users/{_editing.Id}/avatar");
+            if (result.Success)
+            {
+                _editAvatarUrl = null;
+                await LoadAsync();
+            }
+            else
+            {
+                _modalError = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"删除头像失败：{ex.Message}";
+        }
+        finally
+        {
+            _avatarBusy = false;
+        }
+    }
+
+    // ============ 分配权限组 ============
+
+    private async Task OpenGroupsAsync(UserResponse user)
+    {
+        _editing = user;
+        _modalError = null;
+        _error = null;
+        _groupsVisible = true;
+        _groupsLoading = true;
+        _selectedGroupIds.Clear();
+
+        try
+        {
+            var groups = await Api.GetPagedAsync<UserGroupResponse>("/api/user-groups?page=1&pageSize=100");
+            var all = groups.Success ? groups.Items.ToList() : new List<UserGroupResponse>();
+
+            var mine = await Api.GetAsync<List<UserGroupResponse>>($"/api/users/{user.Id}/groups");
+            if (mine.Success && mine.Data is { } data)
+            {
+                foreach (var group in data)
+                {
+                    _selectedGroupIds.Add(group.Id);
+                }
+            }
+
+            // 受保护权限组（成员锁定，如"初始用户"）不可分配：
+            // 用户已是成员的仅作只读展示，其余隐藏，避免出现"可勾选但提交必失败"的选项。
+            _allGroups = all
+                .Where(group => !group.IsMemberLocked || _selectedGroupIds.Contains(group.Id))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"加载权限组失败：{ex.Message}";
+        }
+        finally
+        {
+            _groupsLoading = false;
+        }
+    }
+
+    private void ToggleGroup(ulong groupId, bool selected)
+    {
+        if (selected)
+        {
+            _selectedGroupIds.Add(groupId);
+        }
+        else
+        {
+            _selectedGroupIds.Remove(groupId);
+        }
+    }
+
+    private async Task SaveGroupsAsync()
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        _modalError = null;
+        _saving = true;
+        try
+        {
+            // 受保护权限组（成员锁定）只会以"已加入且不可取消勾选"的形式出现，照原样提交即可：
+            // 服务端拒绝为其新增成员，但允许移除，因此保留勾选才是正确语义。
+            var body = new { groupIds = _selectedGroupIds.ToList() };
+            var result = await Api.PutAsync<object>($"/api/users/{_editing.Id}/groups", body);
+            if (result.Success)
+            {
+                _groupsVisible = false;
+                await LoadAsync();
+            }
+            else
+            {
+                _modalError = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"保存失败：{ex.Message}";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // ============ 重置密码 ============
+
+    private Task OpenResetAsync(UserResponse user)
+    {
+        _editing = user;
+        _resetPassword = string.Empty;
+        _generatedPassword = null;
+        _modalError = null;
+        _error = null;
+        _resetVisible = true;
+        return Task.CompletedTask;
+    }
+
+    private async Task ResetPasswordAsync()
+    {
+        if (_editing is null)
+        {
+            return;
+        }
+
+        _modalError = null;
+        _saving = true;
+        try
+        {
+            var body = new { newPassword = string.IsNullOrWhiteSpace(_resetPassword) ? null : _resetPassword };
+            var result = await Api.PostAsync<ResetPasswordResponse>($"/api/admin/users/{_editing.Id}/reset-password", body);
+
+            if (result.Success && result.Data is { } data)
+            {
+                _generatedPassword = data.GeneratedPassword;
+                _resetPassword = string.Empty;
+                await LoadAsync();
+
+                if (string.IsNullOrWhiteSpace(data.GeneratedPassword))
+                {
+                    _resetVisible = false;
+                }
+            }
+            else
+            {
+                _modalError = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _modalError = $"重置失败：{ex.Message}";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // ============ 删除 ============
+
+    private async Task DeleteAsync(UserResponse user)
+    {
+        _error = null;
+        var result = await Api.DeleteAsync<object>($"/api/users/{user.Id}");
+        if (result.Success)
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            _error = result.Message;
+        }
+    }
+
+    // ============ 展示辅助 ============
+
+    private static string DeleteConfirmText(UserResponse user)
+        => "确认删除用户「" + user.Username + "」？该操作为软删除。";
+
+    private static string StatusText(int status) => status switch
+    {
+        1 => "正常",
+        2 => "封禁",
+        3 => "未验证",
+        4 => "已删除",
+        _ => $"未知({status})"
+    };
+
+    private static string StatusChipClass(int status) => status switch
+    {
+        1 => "is-success",
+        2 => "is-danger",
+        3 => "is-warning",
+        4 => "is-default",
+        _ => "is-default"
+    };
+
+    private static string FormatTime(DateTime? value)
+        => value is null ? "-" : value.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+
+    private static string FormatTime(DateTime value)
+        => value == default ? "-" : value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+}

@@ -1,0 +1,20 @@
+@page "/forbidden"
+@attribute [Authorize]
+
+<PageTitle>无访问权限 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="无访问权限">
+    <Card Bordered="false">
+        <div class="ucs-empty-state">
+            <div class="ucs-empty-code is-warning">403</div>
+            <h2 class="ucs-empty-title">没有访问该功能的权限</h2>
+            <Button Type="@ButtonType.Primary" OnClick="@(() => Navigation.NavigateTo("/"))">
+                返回仪表盘
+            </Button>
+        </div>
+    </Card>
+</PageContainer>
+
+@code {
+    [Inject] private NavigationManager Navigation { get; set; } = default!;
+}

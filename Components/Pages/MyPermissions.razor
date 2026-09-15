@@ -1,0 +1,102 @@
+@page "/my-permissions"
+@attribute [Authorize]
+
+@inject UcsApiClient Api
+@inject PermissionState Permissions
+
+<PageTitle>我的权限 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="我的权限" OnRefresh="LoadAsync" RefreshLoading="_loading">
+    <Actions>
+    </Actions>
+
+    <ChildContent>
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+
+        <Card Bordered="false">
+            <div class="ucs-block-head">
+                <h2 class="ucs-block-title">概要</h2>
+            </div>
+
+            <div class="ucs-form">
+                <div class="ucs-field">
+                    <label class="ucs-field-label">用户 ID</label>
+                    <span>@(_userId?.ToString() ?? "-")</span>
+                </div>
+                <div class="ucs-field">
+                    <label class="ucs-field-label">权限级别</label>
+                    <span>@(_level == PermissionCodes.GroupLevel.NoGroup ? "无权限组（最低）" : _level.ToString())</span>
+                </div>
+                <div class="ucs-field">
+                    <span class="ucs-field-hint">数值越小权限越高：0=初始用户，2=超级管理员，10=管理员，20=普通用户</span>
+                </div>
+            </div>
+        </Card>
+
+        <Card Bordered="false">
+            <div class="ucs-block-head">
+                <h2 class="ucs-block-title">有效权限码（@_codes.Count）</h2>
+            </div>
+
+            @if (_codes.Count == 0)
+            {
+                <Alert Type="@AlertType.Info" ShowIcon="true" Message="当前账号没有任何有效权限码。" />
+            }
+            else
+            {
+                <div class="ucs-chip-list">
+                    @foreach (var permissionCode in _codes)
+                    {
+                        <span class="ucs-chip is-default">@permissionCode</span>
+                    }
+                </div>
+            }
+
+            <span class="ucs-field-hint">
+                权限码为服务端展开后的结果（已包含 A/B/C 特殊权限的覆盖效果），来源于所属权限组。
+            </span>
+        </Card>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private bool _loading;
+    private string? _error;
+
+    private ulong? _userId;
+    private int _level = PermissionCodes.GroupLevel.NoGroup;
+    private List<string> _codes = new();
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var result = await Api.GetEffectivePermissionsAsync();
+            if (result.Success && result.Data is { } data)
+            {
+                _userId = data.UserId;
+                _level = data.Level;
+                _codes = data.Codes?.OrderBy(code => code, StringComparer.Ordinal).ToList() ?? new List<string>();
+                Permissions.Set(_codes, data.Level);
+            }
+            else
+            {
+                _codes = new List<string>();
+                _error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载权限失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+}

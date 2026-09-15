@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using UserManagementSystem.Data;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
@@ -10,35 +11,31 @@ public class UserService : IUserService
     private readonly ApplicationDbContext _context;
     private readonly IOnlineUserService _onlineUserService;
     private readonly IPermissionService _permissionService;
+    private readonly IMemoryCache _cache;
 
-    public UserService(ApplicationDbContext context, IOnlineUserService onlineUserService, IPermissionService permissionService)
+    public UserService(ApplicationDbContext context, IOnlineUserService onlineUserService, IPermissionService permissionService, IMemoryCache cache)
     {
         _context = context;
         _onlineUserService = onlineUserService;
         _permissionService = permissionService;
+        _cache = cache;
     }
+
+    /// <summary>
+    /// OnTokenValidated 中的用户状态缓存键（短 TTL）。
+    /// 用户状态发生变更（删除/封禁）时必须清除对应缓存。
+    /// </summary>
+    public static string UserStatusCacheKey(ulong userId) => $"user_status_{userId}";
 
     public async Task<User?> GetByIdAsync(ulong id)
     {
         return await _context.Users.FindAsync(id);
     }
 
-    public async Task<User?> GetByUsernameAsync(string username)
-    {
-        return await _context.Users
-            .FirstOrDefaultAsync(u => u.Username == username);
-    }
-
     public async Task<User?> GetByEmailAsync(string email)
     {
         return await _context.Users
             .FirstOrDefaultAsync(u => u.Email == email);
-    }
-
-    public async Task<User?> GetByPhoneAsync(string phone)
-    {
-        return await _context.Users
-            .FirstOrDefaultAsync(u => u.Phone == phone);
     }
 
     public async Task<User> CreateUserAsync(User user)
@@ -65,10 +62,12 @@ public class UserService : IUserService
         if (user == null) return false;
 
         user.Status = UserStatus.Deleted;
+        user.DeletedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync();
 
-        // 清除被删除用户的权限缓存
+        // 清除被删除用户的权限缓存与状态缓存
         await _permissionService.InvalidateUserPermissionCacheAsync(id);
+        _cache.Remove(UserStatusCacheKey(id));
 
         return true;
     }
@@ -80,7 +79,10 @@ public class UserService : IUserService
 
         if (status.HasValue)
         {
-            query = query.Where(u => u.Status == (UserStatus)status.Value);
+            var statusEnum = (UserStatus)status.Value;
+            if (!Enum.IsDefined(statusEnum))
+                throw new ArgumentException($"无效的用户状态值: {status.Value}");
+            query = query.Where(u => u.Status == statusEnum);
         }
         else
         {
@@ -106,9 +108,9 @@ public class UserService : IUserService
         return (users, totalCount);
     }
 
-    public int GetOnlineUsersCount()
+    public async Task<int> GetOnlineUsersCountAsync()
     {
-        return _onlineUserService.GetOnlineUsersCount();
+        return await _onlineUserService.GetOnlineUsersCountAsync();
     }
 
     public async Task<int> GetTotalUsersCountAsync()
@@ -136,7 +138,6 @@ public class UserService : IUserService
 
     public async Task<bool> HasAdminAsync()
     {
-        // 检查是否已有用户被加入超级管理员组（排除系统用户 uid=0）
         return await _context.UserGroupMembers
             .Include(m => m.Group)
             .AnyAsync(m => m.Group.Name == PermissionCodes.SuperAdminGroupName && m.UserId != 0);

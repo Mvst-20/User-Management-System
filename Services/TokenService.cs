@@ -40,7 +40,6 @@ public class TokenService : ITokenService
         VerificationTokenType type, 
         string? newEmail = null)
     {
-        // 删除该用户的旧token（同一类型）
         var oldTokens = await _context.EmailVerificationTokens
             .Where(t => t.UserId == userId && t.Type == type && t.ExpiresAt > DateTime.UtcNow)
             .ToListAsync();

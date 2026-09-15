@@ -1,0 +1,128 @@
+@* 侧边导航：按业务分区组织，并仅显示当前账号有权访问的菜单项 *@
+@implements IDisposable
+@inject NavigationManager Navigation
+@inject PermissionState Permissions
+
+<nav class="ucs-nav">
+    @{
+        var activeHref = ResolveActiveHref();
+        var groups = VisibleGroups.ToArray();
+    }
+    @for (var i = 0; i < groups.Length; i++)
+    {
+        var group = groups[i];
+        @* 收起（含窄屏自动收起）时分组标题不可见，改用一条浅灰分隔线区分导航块；首个分组顶部不加 *@
+        if (i > 0)
+        {
+            <div class="ucs-nav-divider" aria-hidden="true"></div>
+        }
+        if (!Collapsed)
+        {
+            <div class="ucs-nav-group-label">@group.Label</div>
+        }
+        foreach (var item in group.Items)
+        {
+            var active = string.Equals(item.Href, activeHref, StringComparison.OrdinalIgnoreCase);
+            <a class="ucs-nav-item @(active ? "is-active" : null)" href="@item.Href" title="@item.Label">
+                <span class="ucs-nav-icon"><UiIcon Name="@item.Icon" /></span>
+                @if (!Collapsed)
+                {
+                    <span class="ucs-nav-text">@item.Label</span>
+                }
+            </a>
+        }
+    }
+</nav>
+
+@code {
+    /// <summary>导航是否需要收起（仅图标）。</summary>
+    [Parameter] public bool Collapsed { get; set; }
+
+    private enum MenuGroupKind
+    {
+        Overview,
+        Identity,
+        System
+    }
+
+    private sealed record MenuItem(string Label, string Href, string Icon, string? Permission = null);
+
+    private sealed record MenuGroupDefinition(MenuGroupKind Kind, string Label, MenuItem[] Items);
+
+    private static readonly MenuGroupDefinition[] MenuGroups =
+    {
+        new(MenuGroupKind.Overview, "总览", new[]
+        {
+            new MenuItem("仪表盘", "/", "layout-dashboard"),
+            new MenuItem("服务器状态", "/server", "activity", PermissionCodes.AdminServer),
+            new MenuItem("运行日志", "/logs", "terminal", PermissionCodes.AdminServer)
+        }),
+        new(MenuGroupKind.Identity, "用户与权限", new[]
+        {
+            new MenuItem("用户管理", "/users", "users", PermissionCodes.UserList),
+            new MenuItem("权限组", "/user-groups", "layers", PermissionCodes.UserGroupRead),
+            new MenuItem("权限", "/permissions", "key-round", PermissionCodes.PermissionRead)
+        }),
+        new(MenuGroupKind.System, "系统", new[]
+        {
+            new MenuItem("系统设置", "/settings", "settings", PermissionCodes.SystemSettingRead),
+            new MenuItem("邮件服务", "/settings/smtp", "mail", PermissionCodes.SmtpRead),
+            new MenuItem("子系统", "/subsystems", "box", PermissionCodes.SubsystemRead)
+        })
+    };
+
+    /// <summary>按有效权限过滤后的菜单分组（无可见项的组不渲染）。</summary>
+    private IEnumerable<MenuGroupDefinition> VisibleGroups => MenuGroups
+        .Select(group => group with { Items = group.Items.Where(i => Permissions.Has(i.Permission)).ToArray() })
+        .Where(group => group.Items.Length > 0);
+
+    protected override void OnInitialized()
+    {
+        Permissions.Changed += OnPermissionsChanged;
+        Navigation.LocationChanged += OnLocationChanged;
+    }
+
+    private void OnPermissionsChanged() => _ = InvokeAsync(StateHasChanged);
+
+    /// <summary>
+    /// 导航后主动重渲染。
+    /// NavMenu 的参数（Collapsed）在路由切换前后没有变化，Blazor 的差异比较会跳过该子组件，
+    /// 导致高亮项停留在旧菜单上；因此必须订阅位置变化并显式触发重渲染。
+    /// </summary>
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = InvokeAsync(StateHasChanged);
+
+    /// <summary>当前匹配到的最长菜单路径：避免 /settings 与 /settings/smtp 同时高亮。</summary>
+    private string? ResolveActiveHref()
+    {
+        var current = CurrentPath();
+        string? best = null;
+
+        foreach (var href in MenuGroups.SelectMany(group => group.Items).Select(item => item.Href))
+        {
+            if (Matches(current, href) && (best is null || href.Length > best.Length))
+            {
+                best = href;
+            }
+        }
+
+        return best;
+    }
+
+    private string CurrentPath()
+    {
+        var current = "/" + Navigation.ToBaseRelativePath(Navigation.Uri);
+        current = current.Split('?')[0];
+        return current.Length > 1 ? current.TrimEnd('/') : current;
+    }
+
+    private static bool Matches(string current, string href) => href == "/"
+        ? current == "/"
+        : current.Equals(href, StringComparison.OrdinalIgnoreCase)
+          || current.StartsWith(href + "/", StringComparison.OrdinalIgnoreCase);
+
+    public void Dispose()
+    {
+        Permissions.Changed -= OnPermissionsChanged;
+        Navigation.LocationChanged -= OnLocationChanged;
+    }
+}

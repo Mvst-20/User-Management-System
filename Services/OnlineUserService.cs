@@ -1,57 +1,53 @@
-namespace UserManagementSystem.Services;
+using Microsoft.EntityFrameworkCore;
+using UserManagementSystem.Data;
+using UserManagementSystem.Models;
 
-public interface IOnlineUserService
-{
-    void MarkUserOnline(string userId);
-    void MarkUserOffline(string userId);
-    int GetOnlineUsersCount();
-    void CleanExpiredUsers(TimeSpan? timeout = null);
-}
+namespace UserManagementSystem.Services;
 
 public class OnlineUserService : IOnlineUserService
 {
-    private readonly Dictionary<string, DateTime> _onlineUsers = new();
-    private readonly object _lock = new();
-    private readonly TimeSpan _defaultTimeout = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(30);
 
-    public void MarkUserOnline(string userId)
+    private readonly ApplicationDbContext _context;
+
+    public OnlineUserService(ApplicationDbContext context)
     {
-        lock (_lock)
-        {
-            _onlineUsers[userId] = DateTime.UtcNow;
-        }
+        _context = context;
     }
 
-    public void MarkUserOffline(string userId)
+    public async Task MarkUserOnlineAsync(string userId)
     {
-        lock (_lock)
+        var now = DateTime.UtcNow;
+        var existing = await _context.OnlineUsers.FindAsync(userId);
+        if (existing == null)
         {
-            _onlineUsers.Remove(userId);
+            _context.OnlineUsers.Add(new OnlineUser { UserId = userId, LastActiveAt = now });
         }
+        else
+        {
+            existing.LastActiveAt = now;
+        }
+        await _context.SaveChangesAsync();
     }
 
-    public int GetOnlineUsersCount()
+    public async Task MarkUserOfflineAsync(string userId)
     {
-        lock (_lock)
-        {
-            return _onlineUsers.Count;
-        }
+        await _context.OnlineUsers
+            .Where(u => u.UserId == userId)
+            .ExecuteDeleteAsync();
     }
 
-    public void CleanExpiredUsers(TimeSpan? timeout = null)
+    public async Task<int> GetOnlineUsersCountAsync()
     {
-        var expiryTime = DateTime.UtcNow - (timeout ?? _defaultTimeout);
-        lock (_lock)
-        {
-            var expiredKeys = _onlineUsers
-                .Where(kvp => kvp.Value < expiryTime)
-                .Select(kvp => kvp.Key)
-                .ToList();
+        var threshold = DateTime.UtcNow - DefaultTimeout;
+        return await _context.OnlineUsers.CountAsync(u => u.LastActiveAt > threshold);
+    }
 
-            foreach (var key in expiredKeys)
-            {
-                _onlineUsers.Remove(key);
-            }
-        }
+    public async Task CleanExpiredUsersAsync(TimeSpan? timeout = null)
+    {
+        var threshold = DateTime.UtcNow - (timeout ?? DefaultTimeout);
+        await _context.OnlineUsers
+            .Where(u => u.LastActiveAt < threshold)
+            .ExecuteDeleteAsync();
     }
 }

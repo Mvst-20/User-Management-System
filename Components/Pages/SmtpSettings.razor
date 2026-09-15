@@ -1,0 +1,242 @@
+@page "/settings/smtp"
+@attribute [Authorize]
+
+@inject UcsApiClient Api
+
+<PageTitle>邮件服务 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="邮件服务配置" OnRefresh="LoadAsync" RefreshLoading="_loading">
+    <Actions>
+    </Actions>
+
+    <ChildContent>
+        <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+        <UcsNotice Message="@_success" Kind="success" OnDismiss="@(() => _success = null)" />
+
+        <PermissionGate Code="@PermissionCodes.SmtpRead">
+            <Card Bordered="false">
+                <div class="ucs-block-head">
+                    <h2 class="ucs-block-title">发件服务器</h2>
+                    @if (!_canEdit)
+                    {
+                        <span class="ucs-chip is-default">只读</span>
+                    }
+                </div>
+                @if (_loading && _config is null)
+                {
+                    <div class="ucs-auth-loading"><Spin /></div>
+                }
+                else
+                {
+                    <div class="ucs-form">
+                        <Checkbox Checked="_enabled" CheckedChanged="@(value => _enabled = value)">
+                            启用邮件服务
+                        </Checkbox>
+
+                        <div class="ucs-form-grid">
+                            <div class="ucs-field">
+                                <label class="ucs-field-label">SMTP 服务器地址</label>
+                                <Input @bind-Value="_host" Placeholder="smtp.example.com" Disabled="!_canEdit" />
+                            </div>
+                            <div class="ucs-field">
+                                <label class="ucs-field-label">端口</label>
+                                <input class="ucs-native-input" type="number" min="1" max="65535"
+                                       value="@_port" @onchange="OnPortChanged" disabled="@(!_canEdit)" />
+                            </div>
+                            <div class="ucs-field">
+                                <label class="ucs-field-label">账号</label>
+                                <Input @bind-Value="_username" Disabled="!_canEdit" />
+                            </div>
+                            <div class="ucs-field">
+                                <label class="ucs-field-label">密码 / 授权码</label>
+                                <InputPassword @bind-Value="_password" Placeholder="留空则不修改" Disabled="!_canEdit" />
+                                <span class="ucs-field-hint">
+                                    @(_config?.HasPassword == true ? "已保存" : "未设置")
+                                </span>
+                            </div>
+                            <div class="ucs-field">
+                                <label class="ucs-field-label">发件人地址</label>
+                                <Input @bind-Value="_fromAddress" Placeholder="noreply@example.com" Disabled="!_canEdit" />
+                            </div>
+                            <div class="ucs-field">
+                                <label class="ucs-field-label">发件人显示名</label>
+                                <Input @bind-Value="_fromName" Disabled="!_canEdit" />
+                            </div>
+                        </div>
+
+                        <Checkbox Checked="_useSsl" CheckedChanged="@(value => _useSsl = value)">
+                            非标准端口使用 SSL 直连
+                        </Checkbox>
+
+                        <PermissionGate Code="@PermissionCodes.SmtpUpdate">
+                            <div class="ucs-form-actions">
+                                <Button Type="@ButtonType.Primary" OnClick="SaveAsync" Loading="_saving">保存配置</Button>
+                            </div>
+                        </PermissionGate>
+
+                        @if (_config?.UpdatedAt is { } updatedAt && updatedAt != default)
+                        {
+                            <span class="ucs-field-hint">最近更新：@updatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
+                        }
+                    </div>
+                }
+            </Card>
+
+            <PermissionGate Code="@PermissionCodes.SmtpUpdate">
+                <Card Bordered="false">
+                    <div class="ucs-block-head">
+                        <h2 class="ucs-block-title">连通性测试</h2>
+                    </div>
+                    <div class="ucs-filter-bar">
+                        <div class="ucs-filter-item">
+                            <span class="ucs-filter-label">收件人邮箱</span>
+                            <Input @bind-Value="_testRecipient" Placeholder="接收测试邮件的地址" />
+                        </div>
+                        <div class="ucs-filter-actions">
+                            <Button Type="@ButtonType.Primary" OnClick="SendTestAsync" Loading="_testing">发送测试邮件</Button>
+                        </div>
+                    </div>
+                    <span class="ucs-field-hint">使用已保存的配置发信</span>
+                </Card>
+            </PermissionGate>
+        </PermissionGate>
+
+        <PermissionGate Code="@PermissionCodes.SmtpRead" Inverse="true">
+            <Card Bordered="false">
+                <Alert Type="@AlertType.Info" ShowIcon="true"
+                       Message="当前账号没有查看邮件服务配置的权限（需要 smtp:read）。" />
+            </Card>
+        </PermissionGate>
+    </ChildContent>
+</PageContainer>
+
+@code {
+    private SmtpConfigResponse? _config;
+    private bool _loading;
+    private bool _saving;
+    private bool _testing;
+    private string? _error;
+    private string? _success;
+
+    private bool _enabled;
+    private string _host = string.Empty;
+    private int _port = 587;
+    private bool _useSsl = true;
+    private string _username = string.Empty;
+    private string _password = string.Empty;
+    private string _fromAddress = string.Empty;
+    private string _fromName = string.Empty;
+
+    private string _testRecipient = string.Empty;
+
+    private bool _canEdit => Permissions.Has(PermissionCodes.SmtpUpdate);
+
+    [Inject] private PermissionState Permissions { get; set; } = default!;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            var result = await Api.GetAsync<SmtpConfigResponse>("/api/admin/smtp/config");
+            if (result.Success && result.Data is { } data)
+            {
+                _config = data;
+                _enabled = data.Enabled;
+                _host = data.Host;
+                _port = data.Port <= 0 ? 587 : data.Port;
+                _useSsl = data.UseSsl;
+                _username = data.Username;
+                _fromAddress = data.FromAddress;
+                _fromName = data.FromName;
+                _password = string.Empty;
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"加载邮件配置失败：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void OnPortChanged(ChangeEventArgs args)
+    {
+        if (int.TryParse(args.Value?.ToString(), out var port))
+        {
+            _port = port;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _error = null;
+        _success = null;
+
+        try
+        {
+            var body = new
+            {
+                enabled = _enabled,
+                host = _host.Trim(),
+                port = _port,
+                useSsl = _useSsl,
+                username = _username.Trim(),
+                password = string.IsNullOrWhiteSpace(_password) ? null : _password,
+                fromAddress = _fromAddress.Trim(),
+                fromName = _fromName.Trim()
+            };
+
+            var result = await Api.PutAsync<SmtpConfigResponse>("/api/admin/smtp/config", body);
+            if (result.Success && result.Data is { } data)
+            {
+                _config = data;
+                _password = string.Empty;
+                _success = "配置已保存并即时生效。";
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task SendTestAsync()
+    {
+        _testing = true;
+        _error = null;
+        _success = null;
+
+        try
+        {
+            var result = await Api.PostAsync<object>("/api/admin/smtp/test", new { to = _testRecipient.Trim() });
+            if (result.Success)
+            {
+                _success = result.Message;
+            }
+            else
+            {
+                _error = result.Message;
+            }
+        }
+        finally
+        {
+            _testing = false;
+        }
+    }
+}

@@ -1,0 +1,116 @@
+@* 管理后台主框架：侧边导航 + 顶部信息栏 + 内容区 *@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject UcsApiClient Api
+@inject PermissionState Permissions
+@inject NavigationManager Navigation
+
+@* 仅当确认已登录后才渲染外壳。
+   AuthorizeRouteView 会把「鉴权中 / 未授权」片段一并放进本布局渲染，
+   若此处无条件输出，未登录用户会先看到整个控制台框架再被跳转到登录页（一闪而过）。
+   Authorizing 与 NotAuthorized 均输出空白：前者由登录态恢复决定，后者由
+   RedirectToLogin 负责跳转，都不需要框架。 *@
+<AuthorizeView>
+    <Authorized>
+        <div class="ucs-shell">
+            <aside class="ucs-sider @(_collapsed ? "is-collapsed" : null)">
+                <div class="ucs-sider-brand">
+                    <span class="ucs-sider-logo"><UiIcon Name="terminal" Size="14" /></span>
+                    @if (!_collapsed)
+                    {
+                        <span class="ucs-sider-title">@_siteName</span>
+                    }
+                </div>
+
+                <div class="ucs-sider-menu">
+                    <NavMenu Collapsed="_collapsed" />
+                </div>
+
+                <button class="ucs-sider-trigger" type="button" title="@(_collapsed ? "展开导航" : "收起导航")"
+                        @onclick="ToggleCollapsed">
+                    <UiIcon Name="@(_collapsed ? "panel-left-open" : "panel-left-close")" />
+                </button>
+            </aside>
+
+            <div class="ucs-main">
+                <header class="ucs-header">
+                    <TopBar />
+                </header>
+
+                <main class="ucs-content">
+                    @Body
+                </main>
+            </div>
+        </div>
+    </Authorized>
+    <Authorizing></Authorizing>
+    <NotAuthorized></NotAuthorized>
+</AuthorizeView>
+
+<AntContainer />
+
+@code {
+    private bool _collapsed;
+
+    /// <summary>侧栏标题：取自系统设置中的站点名称（获取失败时回落到 UCS）。</summary>
+    private string _siteName = "UCS";
+
+    /// <summary>
+    /// 在 SSR（预渲染）阶段即获取站点名称，使首次渲染就显示真实名称，
+    /// 避免"先显示默认 UCS、加载完成后再替换"的闪烁。
+    /// </summary>
+    protected override async Task OnInitializedAsync() => await EnsureSiteInfoLoadedAsync();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        Api.SessionExpired += OnSessionExpired;
+        await EnsurePermissionsLoadedAsync();
+    }
+
+    private async Task EnsureSiteInfoLoadedAsync()
+    {
+        try
+        {
+            var result = await Api.GetAsync<SystemInfoResponse>("/api/system/info");
+            if (result.Success && result.Data is { } info && !string.IsNullOrWhiteSpace(info.SiteName))
+            {
+                _siteName = info.SiteName;
+                StateHasChanged();
+            }
+        }
+        catch
+        {
+            // 站点信息不可用时保留默认标题，不影响控制台使用
+        }
+    }
+
+    private async Task EnsurePermissionsLoadedAsync()
+    {
+        if (Permissions.Loaded)
+        {
+            return;
+        }
+
+        var result = await Api.GetEffectivePermissionsAsync();
+        if (result.Success && result.Data is { } data)
+        {
+            Permissions.Set(data.Codes, data.Level);
+        }
+        else if (result.Code == ResultCodes.Unauthorized)
+        {
+            Permissions.Clear();
+        }
+    }
+
+    private void OnSessionExpired()
+        => _ = InvokeAsync(() => Navigation.NavigateTo("/login?expired=1", replace: true));
+
+    private void ToggleCollapsed() => _collapsed = !_collapsed;
+
+    public void Dispose() => Api.SessionExpired -= OnSessionExpired;
+}
