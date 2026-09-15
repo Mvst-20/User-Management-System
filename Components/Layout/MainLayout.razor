@@ -8,8 +8,10 @@
 @* 仅当确认已登录后才渲染外壳。
    AuthorizeRouteView 会把「鉴权中 / 未授权」片段一并放进本布局渲染，
    若此处无条件输出，未登录用户会先看到整个控制台框架再被跳转到登录页（一闪而过）。
-   Authorizing 与 NotAuthorized 均输出空白：前者由登录态恢复决定，后者由
-   RedirectToLogin 负责跳转，都不需要框架。 *@
+   Authorizing 输出空白：登录态恢复中，不需要框架。
+   NotAuthorized 必须输出 @Body —— 该位置的内容是 RedirectToLogin，
+   跳转由它自己的 OnInitialized 触发；若一并清空，跳转组件永远不会被实例化，
+   未登录直接访问受保护页面会停在纯白页。 *@
 <AuthorizeView>
     <Authorized>
         <div class="ucs-shell">
@@ -44,7 +46,7 @@
         </div>
     </Authorized>
     <Authorizing></Authorizing>
-    <NotAuthorized></NotAuthorized>
+    <NotAuthorized>@Body</NotAuthorized>
 </AuthorizeView>
 
 <AntContainer />
