@@ -88,6 +88,8 @@
         @* ============ 添加用户 ============ *@
         <Modal Title="添加用户"
                Visible="_createVisible"
+               Centered="true"
+               BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
                ConfirmLoading="_saving"
                OnOk="@(_ => CreateUserAsync())"
                OnCancel="@(_ => _createVisible = false)"
@@ -149,6 +151,8 @@
         @* ============ 编辑用户 ============ *@
         <Modal Title="@($"编辑用户 · {_editing?.Username}")"
                Visible="_editVisible"
+               Centered="true"
+               BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
                ConfirmLoading="_saving"
                OnOk="@(_ => SaveUserAsync())"
                OnCancel="@(_ => _editVisible = false)"
@@ -230,6 +234,8 @@
         @* ============ 分配权限组 ============ *@
         <Modal Title="@($"权限组分配 · {_editing?.Username}")"
                Visible="_groupsVisible"
+               Centered="true"
+               BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
                ConfirmLoading="_saving"
                OnOk="@(_ => SaveGroupsAsync())"
                OnCancel="@(_ => _groupsVisible = false)"
@@ -270,6 +276,8 @@
         @* ============ 重置密码 ============ *@
         <Modal Title="@($"重置密码 · {_editing?.Username}")"
                Visible="_resetVisible"
+               Centered="true"
+               BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
                ConfirmLoading="_saving"
                OnOk="@(_ => ResetPasswordAsync())"
                OnCancel="@(_ => _resetVisible = false)"

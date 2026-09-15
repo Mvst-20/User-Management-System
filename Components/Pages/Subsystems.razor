@@ -92,6 +92,8 @@
 
         <Modal Title="@(_editing is null ? "登记子系统" : "编辑子系统")"
                Visible="_editVisible"
+               Centered="true"
+               BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
                ConfirmLoading="_saving"
                OnOk="@(_ => SaveAsync())"
                OnCancel="@(_ => _editVisible = false)"
@@ -141,7 +143,6 @@
                     <label class="ucs-field-label">有效期</label>
                     <input class="ucs-native-input" type="date" value="@_expiresDate"
                            @onchange="OnExpiryDateChanged" disabled="@_neverExpires" />
-                    <span class="ucs-field-hint">有效期至所选日期当日结束；勾选「永不过期」后无需选择</span>
                 </div>
             </div>
         </Modal>

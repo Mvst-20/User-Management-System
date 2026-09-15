@@ -109,6 +109,8 @@
 
 <Modal Title="@(_editing is null ? "新建权限" : "编辑权限")"
        Visible="_editVisible"
+       Centered="true"
+       BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
        ConfirmLoading="_saving"
        OnOk="@(_ => SaveAsync())"
        OnCancel="@(_ => _editVisible = false)"

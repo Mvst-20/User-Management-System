@@ -16,6 +16,7 @@
 
     <ChildContent>
         <UcsNotice Message="@_error" Kind="error" OnDismiss="@(() => _error = null)" />
+        <UcsNotice Message="@_success" Kind="success" OnDismiss="@(() => _success = null)" />
 
         <Card Bordered="false">
             <Table TItem="UserGroupResponse"
@@ -114,6 +115,8 @@
         @* ============ 成员管理 ============ *@
         <Modal Title="@($"成员管理 · {_editing?.Name}")"
                Visible="_membersVisible"
+               Centered="true"
+               BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
                Footer="null"
                Width="640"
                OnCancel="@(_ => _membersVisible = false)"
@@ -168,6 +171,8 @@
         @* ============ 权限分配 ============ *@
         <Modal Title="@($"权限分配 · {_editing?.Name}")"
                Visible="_permissionsVisible"
+               Centered="true"
+               BodyStyle="max-height: calc(100vh - 200px); overflow-y: auto;"
                ConfirmLoading="_saving"
                Width="720"
                OnOk="@(_ => SavePermissionsAsync())"
@@ -225,6 +230,7 @@
     private bool _saving;
     private bool _detailLoading;
     private string? _error;
+    private string? _success;
 
     private UserGroupResponse? _editing;
 
@@ -476,6 +482,7 @@
     {
         _editing = group;
         _permissionsVisible = true;
+        _success = null;
         _selectedPermissionIds.Clear();
         await LoadPermissionsAsync(group.Id);
     }
@@ -541,6 +548,7 @@
             var result = await Api.PutAsync<object>($"/api/user-groups/{_editing.Id}/permissions", body);
             if (result.Success)
             {
+                _success = "权限分配已保存";
                 _permissionsVisible = false;
                 await LoadAsync();
             }

@@ -1187,7 +1187,8 @@ a {
     display: flex;
     flex-direction: column;
     gap: 1px;
-    max-height: 420px;
+    /* 矮视口下收缩，配合弹窗正文限高，保证弹窗整体不超出屏幕 */
+    max-height: min(420px, calc(100vh - 360px));
     overflow-y: auto;
     background: var(--ucs-line);
     border: 1px solid var(--ucs-line);
@@ -1222,7 +1223,8 @@ a {
     display: flex;
     flex-direction: column;
     gap: 16px;
-    max-height: 460px;
+    /* 矮视口下收缩，配合弹窗正文限高，避免列表把说明条与底部按钮顶出视野 */
+    max-height: min(460px, calc(100vh - 340px));
     overflow-y: auto;
     padding-right: 4px;
 }
@@ -1756,6 +1758,11 @@ a {
 
 .ant-modal-body {
     padding: 20px;
+}
+
+/* 弹窗内的加载占位：页面级 min-height:60vh 会在矮视口下把弹窗正文撑出滚动条 */
+.ant-modal-body .ucs-auth-loading {
+    min-height: 160px;
 }
 
 .ant-modal-footer {
