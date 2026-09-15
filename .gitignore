@@ -365,6 +365,9 @@ FodyWeavers.xsd
 /IHS_README.md
 /appsettings.json
 
+# 本地启动配置（含开发者个人的环境变量与连接串）
+/Properties/launchSettings.json
+
 # Data Protection 密钥目录
 /keys/
 

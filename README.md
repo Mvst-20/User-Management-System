@@ -176,6 +176,8 @@ dotnet run                       # 开发环境
 dotnet run --environment Production
 ```
 
+首次运行前复制 `Properties/launchSettings.template.json` 为 `Properties/launchSettings.json`，替换 `YOUR_DB_USER`、`YOUR_DB_PASSWORD`。
+
 宿主启动完成后打印监听地址（通配地址规范化为 `localhost`）：
 
 ```
@@ -194,7 +196,7 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 |------|------|
 | `launchBrowser: true` | 启动时打开浏览器 |
 | 未设置 `launchUrl` | 打开应用根路径（控制台 `/`）；设为 `swagger` 则打开接口文档 |
-| `environmentVariables.UCS_DB_CONNECTION` | 开发环境连接串，避免依赖系统级变量 |
+| `environmentVariables.UCS_DB_CONNECTION` | 开发环境连接串 |
 
 #### 首次启动行为
 
