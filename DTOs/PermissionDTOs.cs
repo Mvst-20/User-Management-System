@@ -79,6 +79,12 @@ public record PermissionCheckItem(
     bool Granted
 );
 
+/// <summary>
+/// 全局权限版本号。前端轮询该值，与本地位于 <c>PermissionState.Version</c> 的快照比较，
+/// 不一致时才重新拉取权限集合——把「权限变更感知」的成本压到每 30 秒一次极轻请求。
+/// </summary>
+public record PermissionVersionResponse(long Version);
+
 // ============ 用户组请求 DTOs ============
 
 public record CreateUserGroupRequest(

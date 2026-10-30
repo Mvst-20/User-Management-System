@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using UserManagementSystem.Configuration;
 using UserManagementSystem.Data;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
@@ -10,15 +11,27 @@ public class PermissionService : IPermissionService
 {
     private readonly ApplicationDbContext _context;
     private readonly IMemoryCache _cache;
+    private readonly ICacheVersionService _cacheVersionService;
     private readonly ILogger<PermissionService> _logger;
 
-    private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
+    /// <summary>权限缓存 TTL：版本号失效是主路径，TTL 仅作兜底。</summary>
+    private readonly TimeSpan _cacheTtl;
 
-    public PermissionService(ApplicationDbContext context, IMemoryCache cache, ILogger<PermissionService> logger)
+    /// <summary>版本号不可用（降级为 0）时的短 TTL，尽快恢复对权限变更的感知。</summary>
+    private static readonly TimeSpan DegradedCacheTtl = TimeSpan.FromSeconds(30);
+
+    public PermissionService(
+        ApplicationDbContext context,
+        IMemoryCache cache,
+        ICacheVersionService cacheVersionService,
+        ILogger<PermissionService> logger,
+        AppConfiguration appConfig)
     {
         _context = context;
         _cache = cache;
+        _cacheVersionService = cacheVersionService;
         _logger = logger;
+        _cacheTtl = TimeSpan.FromMinutes(Math.Max(1, appConfig.Permissions.CacheTtlMinutes));
     }
 
     // ============ 权限归属（子系统自注册）============
@@ -137,30 +150,23 @@ public class PermissionService : IPermissionService
             return new SubsystemPermissionSyncResult(0, 0, 0, conflicts);
         }
 
-        // 删除前先查受影响用户（权限删除后无法再反查），用于失效其权限缓存
-        var deleteIds = toDelete.Select(p => p.Id).ToList();
-        var affectedUserIds = deleteIds.Count == 0
-            ? new List<ulong>()
-            : await _context.UserGroupPermissions
-                .Where(gp => deleteIds.Contains(gp.PermissionId))
-                .Join(_context.UserGroupMembers,
-                    gp => gp.GroupId,
-                    member => member.GroupId,
-                    (gp, member) => member.UserId)
-                .Distinct()
-                .ToListAsync();
-
         if (toDelete.Count > 0)
         {
             _context.Permissions.RemoveRange(toDelete);
         }
 
         await _context.SaveChangesAsync();
-        await InvalidateUsersPermissionCacheAsync(affectedUserIds);
+
+        // 版本号全局失效：不再反查受影响的用户清单（原实现需要联表 + 逐用户清缓存，
+        // 成员规模大时是明显的写放大，且在多实例部署下无法覆盖其他实例的缓存）。
+        if (added + updated + toDelete.Count > 0)
+        {
+            await InvalidateAllPermissionCacheAsync();
+        }
 
         _logger.LogInformation(
-            "子系统 {SubsystemCode}({SubsystemId}) 权限自注册同步：新增 {Added}、更新 {Updated}、删除 {Deleted}、失效缓存用户 {Users}",
-            subsystemCode, subsystemId, added, updated, toDelete.Count, affectedUserIds.Count);
+            "子系统 {SubsystemCode}({SubsystemId}) 权限自注册同步：新增 {Added}、更新 {Updated}、删除 {Deleted}、已递增权限版本号",
+            subsystemCode, subsystemId, added, updated, toDelete.Count);
 
         return new SubsystemPermissionSyncResult(added, updated, toDelete.Count, conflicts);
     }
@@ -191,7 +197,9 @@ public class PermissionService : IPermissionService
 
     public async Task<List<string>> GetUserPermissionCodesAsync(ulong userId)
     {
-        var cacheKey = $"user_permissions_{userId}";
+        var version = await _cacheVersionService.GetVersionAsync(CacheScopes.Permission);
+        var cacheKey = UserPermissionCacheKey(version, userId);
+        var ttl = CacheTtlFor(version);
 
         if (_cache.TryGetValue(cacheKey, out List<string>? cachedPermissions) && cachedPermissions != null)
             return cachedPermissions;
@@ -204,7 +212,7 @@ public class PermissionService : IPermissionService
         if (!groupIds.Any())
         {
             // 缓存空结果，避免每次无权限用户请求都查询数据库
-            _cache.Set(cacheKey, new List<string>(), CacheDuration);
+            _cache.Set(cacheKey, new List<string>(), ttl);
             return new List<string>();
         }
 
@@ -214,7 +222,7 @@ public class PermissionService : IPermissionService
             .Distinct()
             .ToListAsync();
 
-        _cache.Set(cacheKey, permissionCodes, CacheDuration);
+        _cache.Set(cacheKey, permissionCodes, ttl);
 
         return permissionCodes;
     }
@@ -227,7 +235,7 @@ public class PermissionService : IPermissionService
         // A 权限：展开为系统内全部权限码（含后续新增的自定义权限）
         if (granted.Contains(PermissionCodes.PermA))
         {
-            var allCodes = await _context.Permissions.Select(p => p.Code).ToListAsync();
+            var allCodes = await GetAllPermissionCodesAsync();
             effective.UnionWith(allCodes);
             effective.Add(PermissionCodes.PermA);
             return effective.ToList();
@@ -244,21 +252,41 @@ public class PermissionService : IPermissionService
         return effective.ToList();
     }
 
-    public Task InvalidateUserPermissionCacheAsync(ulong userId)
+    /// <summary>
+    /// 全量权限码（A 权限展开用）。该结果对 A 权限用户是每请求必经项，
+    /// 按版本号缓存后避免高频查询整张权限表。
+    /// </summary>
+    private async Task<List<string>> GetAllPermissionCodesAsync()
     {
-        _cache.Remove($"user_permissions_{userId}");
-        return Task.CompletedTask;
+        var version = await _cacheVersionService.GetVersionAsync(CacheScopes.Permission);
+        var cacheKey = AllPermissionCodesCacheKey(version);
+        var ttl = CacheTtlFor(version);
+
+        if (_cache.TryGetValue(cacheKey, out List<string>? cached) && cached != null)
+            return cached;
+
+        var allCodes = await _context.Permissions.Select(p => p.Code).ToListAsync();
+        _cache.Set(cacheKey, allCodes, ttl);
+        return allCodes;
     }
+
+    private static string UserPermissionCacheKey(long version, ulong userId) => $"perm:v{version}:user:{userId}";
+
+    private static string AllPermissionCodesCacheKey(long version) => $"perm:v{version}:all";
+
+    private TimeSpan CacheTtlFor(long version) => version > 0 ? _cacheTtl : DegradedCacheTtl;
+
+    public Task InvalidateAllPermissionCacheAsync()
+        => _cacheVersionService.BumpAsync(CacheScopes.Permission);
+
+    public Task InvalidateUserPermissionCacheAsync(ulong userId)
+        => _cacheVersionService.BumpAsync(CacheScopes.Permission);
 
     public Task InvalidateUsersPermissionCacheAsync(IEnumerable<ulong> userIds)
-    {
-        foreach (var userId in userIds.Distinct())
-        {
-            _cache.Remove($"user_permissions_{userId}");
-        }
+        => _cacheVersionService.BumpAsync(CacheScopes.Permission);
 
-        return Task.CompletedTask;
-    }
+    public Task<long> GetPermissionVersionAsync(CancellationToken ct = default)
+        => _cacheVersionService.GetVersionAsync(CacheScopes.Permission, ct);
 
     // ============ 权限 CRUD ============
 
@@ -298,6 +326,9 @@ public class PermissionService : IPermissionService
         permission.CreatedAt = DateTime.UtcNow;
         _context.Permissions.Add(permission);
         await _context.SaveChangesAsync();
+
+        // 新增权限码会改变 A 权限用户的「全量权限码」展开结果
+        await InvalidateAllPermissionCacheAsync();
         return permission;
     }
 
@@ -320,6 +351,9 @@ public class PermissionService : IPermissionService
 
         _context.Permissions.Remove(permission);
         await _context.SaveChangesAsync();
+
+        // 原实现遗漏了缓存失效：删除后持有该权限的用户最长要等 TTL 才失去权限
+        await InvalidateAllPermissionCacheAsync();
         return true;
     }
 
@@ -344,12 +378,12 @@ public class PermissionService : IPermissionService
             PermissionCodes.UserList,
             PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail, PermissionCodes.UserLogout,
             PermissionCodes.UserResetPassword,
+            PermissionCodes.SessionRead, PermissionCodes.SessionRevoke, PermissionCodes.LoginHistoryRead,
             PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
             PermissionCodes.AdminStats, PermissionCodes.AdminServer,
             PermissionCodes.PermissionRead, PermissionCodes.PermissionCreate, PermissionCodes.PermissionUpdate, PermissionCodes.PermissionDelete,
             PermissionCodes.UserGroupRead, PermissionCodes.UserGroupCreate, PermissionCodes.UserGroupUpdate, PermissionCodes.UserGroupDelete,
             PermissionCodes.UserGroupManageMembers, PermissionCodes.UserGroupManagePermissions,
-            PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage,
             PermissionCodes.SystemSettingRead, PermissionCodes.SystemSettingUpdate,
             PermissionCodes.SmtpRead, PermissionCodes.SmtpUpdate,
             PermissionCodes.SubsystemRead, PermissionCodes.SubsystemCreate,
@@ -399,6 +433,9 @@ public class PermissionService : IPermissionService
         PermissionCodes.UserChangeEmail => ("修改邮箱", "user", "修改用户邮箱"),
         PermissionCodes.UserLogout => ("登出", "user", "用户登出"),
         PermissionCodes.UserResetPassword => ("重置密码", "user", "重置指定用户的登录密码"),
+        PermissionCodes.SessionRead => ("查看登录设备", "security", "查看本人已登录的设备列表"),
+        PermissionCodes.SessionRevoke => ("踢出登录设备", "security", "踢出本人指定设备或全部其他设备"),
+        PermissionCodes.LoginHistoryRead => ("查看登录历史", "security", "查看本人的登录、刷新、登出与被踢记录"),
         PermissionCodes.AvatarUpload => ("上传头像", "avatar", "上传用户头像"),
         PermissionCodes.AvatarDelete => ("删除头像", "avatar", "删除用户头像"),
         PermissionCodes.AdminStats => ("查看统计", "admin", "查看管理员统计数据"),
@@ -413,9 +450,6 @@ public class PermissionService : IPermissionService
         PermissionCodes.UserGroupDelete => ("删除用户组", "user-group", "删除用户组"),
         PermissionCodes.UserGroupManageMembers => ("管理用户组成员", "user-group", "添加或移除用户组成员"),
         PermissionCodes.UserGroupManagePermissions => ("管理用户组权限", "user-group", "设置用户组权限"),
-        PermissionCodes.FollowUser => ("关注用户", "follow", "关注和取消关注其他用户"),
-        PermissionCodes.FollowRead => ("查看关注", "follow", "查看关注列表和粉丝列表"),
-        PermissionCodes.FollowManage => ("管理关注设置", "follow", "管理关注列表隐私设置"),
         PermissionCodes.SystemSettingRead => ("查看系统设置", "system-setting", "查看系统设置信息"),
         PermissionCodes.SystemSettingUpdate => ("更新系统设置", "system-setting", "更新系统设置信息"),
         PermissionCodes.SmtpRead => ("查看邮件配置", "smtp", "查看邮件服务配置"),
@@ -526,7 +560,7 @@ public class PermissionService : IPermissionService
                 PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail, PermissionCodes.UserResetPassword,
                 PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
                 PermissionCodes.AdminStats, PermissionCodes.UserGroupRead, PermissionCodes.UserLogout,
-                PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage,
+                PermissionCodes.SessionRead, PermissionCodes.SessionRevoke, PermissionCodes.LoginHistoryRead,
                 PermissionCodes.SystemSettingRead, PermissionCodes.SystemSettingUpdate
             };
             foreach (var code in adminPermCodes.Where(c => permByCode.ContainsKey(c)))
@@ -543,7 +577,7 @@ public class PermissionService : IPermissionService
                 PermissionCodes.UserRead, PermissionCodes.UserUpdate,
                 PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail,
                 PermissionCodes.UserLogout, PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
-                PermissionCodes.FollowUser, PermissionCodes.FollowRead, PermissionCodes.FollowManage
+                PermissionCodes.SessionRead, PermissionCodes.SessionRevoke, PermissionCodes.LoginHistoryRead
             };
             foreach (var code in normalPermCodes.Where(c => permByCode.ContainsKey(c)))
             {

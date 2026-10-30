@@ -4,6 +4,7 @@
 
 @inject UcsApiClient Api
 @inject PermissionState Permissions
+@inject ModalService ModalSvc
 
 <PageTitle>权限组 · UCS 管理控制台</PageTitle>
 
@@ -54,25 +55,54 @@
                 <PropertyColumn Title="成员数" Property="c => c.MemberCount" />
                 <PropertyColumn Title="权限数" Property="c => c.PermissionCount" />
                 <Column TData="UserGroupResponse" Title="操作">
-                    <Space>
-                        <PermissionGate Code="@PermissionCodes.UserGroupUpdate">
-                            <Button OnClick="@(() => OpenEdit(context))"
-                                    Disabled="@(!Permissions.CanManageGroup(context.Level))">编辑</Button>
-                        </PermissionGate>
-                        <PermissionGate Code="@PermissionCodes.UserGroupManageMembers">
-                            <Button OnClick="@(() => OpenMembersAsync(context))">成员</Button>
-                        </PermissionGate>
-                        <PermissionGate Code="@PermissionCodes.UserGroupManagePermissions">
-                            <Button OnClick="@(() => OpenPermissionsAsync(context))">权限</Button>
-                        </PermissionGate>
-                        <PermissionGate Code="@PermissionCodes.UserGroupDelete">
-                            <Popconfirm Title="@DeleteConfirmText(context)"
-                                        OnConfirm="@(_ => DeleteAsync(context))">
-                                <Button Danger="true"
-                                        Disabled="@(context.IsProtected || !Permissions.CanManageGroup(context.Level))">删除</Button>
-                            </Popconfirm>
-                        </PermissionGate>
-                    </Space>
+                    <PermissionGate AnyOf="@(new[]
+                                             {
+                                                 PermissionCodes.UserGroupUpdate,
+                                                 PermissionCodes.UserGroupManageMembers,
+                                                 PermissionCodes.UserGroupManagePermissions,
+                                                 PermissionCodes.UserGroupDelete
+                                             })">
+                        <Dropdown Trigger="@(new[] { Trigger.Click })" Placement="@Placement.BottomRight">
+                            <Overlay>
+                                <Menu>
+                                    <PermissionGate Code="@PermissionCodes.UserGroupUpdate">
+                                        <MenuItem Key="edit"
+                                                  OnClick="@(() => OpenEdit(context))"
+                                                  Disabled="@(!Permissions.CanManageGroup(context.Level))">
+                                            <UiIcon Name="pencil" Size="14" />
+                                            <span>编辑</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                    <PermissionGate Code="@PermissionCodes.UserGroupManageMembers">
+                                        <MenuItem Key="members" OnClick="@(() => OpenMembersAsync(context))">
+                                            <UiIcon Name="users" Size="14" />
+                                            <span>成员</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                    <PermissionGate Code="@PermissionCodes.UserGroupManagePermissions">
+                                        <MenuItem Key="permissions" OnClick="@(() => OpenPermissionsAsync(context))">
+                                            <UiIcon Name="key-round" Size="14" />
+                                            <span>权限</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                    <PermissionGate Code="@PermissionCodes.UserGroupDelete">
+                                        <MenuItem Key="delete"
+                                                  OnClick="@(() => ConfirmDeleteAsync(context))"
+                                                  Disabled="@(context.IsProtected || !Permissions.CanManageGroup(context.Level))">
+                                            <UiIcon Name="trash" Size="14" />
+                                            <span>删除</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                </Menu>
+                            </Overlay>
+                            <ChildContent>
+                                <button type="button" class="ucs-row-actions-trigger" title="更多操作"
+                                        aria-label="更多操作">
+                                    <UiIcon Name="ellipsis" Size="16" />
+                                </button>
+                            </ChildContent>
+                        </Dropdown>
+                    </PermissionGate>
                 </Column>
             </Table>
         </Card>
@@ -373,6 +403,22 @@
         finally
         {
             _saving = false;
+        }
+    }
+
+    private async Task ConfirmDeleteAsync(UserGroupResponse group)
+    {
+        var confirmed = await ModalSvc.ConfirmAsync(new ConfirmOptions
+        {
+            Title = "删除权限组",
+            Content = DeleteConfirmText(group),
+            OkText = "删除",
+            CancelText = "取消"
+        });
+
+        if (confirmed)
+        {
+            await DeleteAsync(group);
         }
     }
 

@@ -25,23 +25,13 @@ public class TokenCleanupService : BackgroundService
             {
                 using var scope = _serviceProvider.CreateScope();
                 var tokenService = scope.ServiceProvider.GetRequiredService<ITokenService>();
-                var onlineUserService = scope.ServiceProvider.GetRequiredService<IOnlineUserService>();
+                var sessionService = scope.ServiceProvider.GetRequiredService<ISessionService>();
                 var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
                 await tokenService.DeleteExpiredTokensAsync();
 
-                var expiredRefreshCount = await context.Users
-                    .Where(u => u.RefreshTokenExpiresAt != null && u.RefreshTokenExpiresAt < DateTime.UtcNow
-                             && u.RefreshToken != null)
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(u => u.RefreshToken, (string?)null)
-                        .SetProperty(u => u.RefreshTokenExpiresAt, (DateTime?)null),
-                        cancellationToken: stoppingToken);
-
-                if (expiredRefreshCount > 0)
-                {
-                    _logger.LogInformation("Cleaned {Count} expired refresh tokens", expiredRefreshCount);
-                }
+                // 过期会话与超期登录日志（按 Security:LoginHistoryRetentionDays 保留）
+                await sessionService.CleanupAsync(stoppingToken);
 
                 // 清理已过期的 JWT 黑名单记录（token 已自然过期，记录不再需要）
                 var revokedCount = await context.RevokedTokens
@@ -59,8 +49,6 @@ public class TokenCleanupService : BackgroundService
                 {
                     _logger.LogInformation("Cleaned {Count} expired rate-limit entries", rateLimitCount);
                 }
-
-                await onlineUserService.CleanExpiredUsersAsync();
             }
             catch (Exception ex)
             {

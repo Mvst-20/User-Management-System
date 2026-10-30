@@ -17,14 +17,15 @@ public class ApplicationDbContext : DbContext
     public DbSet<UserGroup> UserGroups { get; set; }
     public DbSet<UserGroupMember> UserGroupMembers { get; set; }
     public DbSet<UserGroupPermission> UserGroupPermissions { get; set; }
-    public DbSet<UserFollow> UserFollows { get; set; }
     public DbSet<SystemSetting> SystemSettings { get; set; }
     public DbSet<RevokedToken> RevokedTokens { get; set; }
     public DbSet<RateLimitEntry> RateLimitEntries { get; set; }
-    public DbSet<OnlineUser> OnlineUsers { get; set; }
+    public DbSet<UserSession> UserSessions { get; set; }
+    public DbSet<LoginLog> LoginLogs { get; set; }
     public DbSet<SmtpConfig> SmtpConfigs { get; set; }
     public DbSet<Subsystem> Subsystems { get; set; }
     public DbSet<ServerMetric> ServerMetrics { get; set; }
+    public DbSet<CacheVersion> CacheVersions { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -44,8 +45,6 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.CreatedAt)
                 .HasColumnType("datetime")
                 .ValueGeneratedOnAdd();
-            entity.Property(e => e.IsFollowingListHidden)
-                .HasDefaultValue(false);
         });
 
         modelBuilder.Entity<EmailVerificationToken>(entity =>
@@ -137,27 +136,6 @@ public class ApplicationDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        modelBuilder.Entity<UserFollow>(entity =>
-        {
-            entity.HasIndex(e => new { e.FollowerId, e.FollowingId }).IsUnique();
-            entity.HasIndex(e => e.FollowerId);
-            entity.HasIndex(e => e.FollowingId);
-            entity.HasIndex(e => e.CreatedAt);
-            entity.Property(e => e.CreatedAt)
-                .HasColumnType("datetime")
-                .ValueGeneratedOnAdd();
-
-            entity.HasOne(e => e.Follower)
-                .WithMany(u => u.Following)
-                .HasForeignKey(e => e.FollowerId)
-                .OnDelete(DeleteBehavior.Cascade);
-
-            entity.HasOne(e => e.Following)
-                .WithMany(u => u.Followers)
-                .HasForeignKey(e => e.FollowingId)
-                .OnDelete(DeleteBehavior.Cascade);
-        });
-
         modelBuilder.Entity<SystemSetting>(entity =>
         {
             entity.HasIndex(e => e.Key).IsUnique();
@@ -175,9 +153,33 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.ExpiresAt);
         });
 
-        modelBuilder.Entity<OnlineUser>(entity =>
+        // 会话表：按用户查列表、按设备键做"同类设备只留最近一个"、按活跃时间统计在线
+        modelBuilder.Entity<UserSession>(entity =>
         {
+            entity.HasIndex(e => e.UserId);
+            entity.HasIndex(e => e.RefreshTokenHash).IsUnique();
+            entity.HasIndex(e => e.PreviousRefreshTokenHash);
+            entity.HasIndex(e => new { e.UserId, e.DeviceKey });
             entity.HasIndex(e => e.LastActiveAt);
+            entity.Property(e => e.CreatedAt).HasColumnType("datetime");
+            entity.Property(e => e.LastActiveAt).HasColumnType("datetime");
+            entity.Property(e => e.RefreshTokenExpiresAt).HasColumnType("datetime");
+            entity.Property(e => e.RevokedAt).HasColumnType("datetime");
+
+            // 用户删除时会话级联清理，避免孤儿会话
+            entity.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // 登录审计：按用户 + 时间分页；按时间做保留期清理
+        modelBuilder.Entity<LoginLog>(entity =>
+        {
+            entity.HasIndex(e => new { e.UserId, e.CreatedAt });
+            entity.HasIndex(e => e.CreatedAt);
+            entity.HasIndex(e => e.Ip);
+            entity.Property(e => e.CreatedAt).HasColumnType("datetime");
         });
 
         // 单行配置表，主键固定为 1，不自增
@@ -202,6 +204,12 @@ public class ApplicationDbContext : DbContext
         {
             entity.HasIndex(e => e.RecordedAt);
             entity.Property(e => e.RecordedAt).HasColumnType("datetime");
+        });
+
+        // 缓存版本号：每个作用域一行，写入为单条 UPSERT
+        modelBuilder.Entity<CacheVersion>(entity =>
+        {
+            entity.Property(e => e.UpdatedAt).HasColumnType("datetime");
         });
     }
 }

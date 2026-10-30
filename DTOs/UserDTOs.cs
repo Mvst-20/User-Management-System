@@ -34,10 +34,7 @@ public record UpdateUserRequest(
     JsonElement? Extras = null,
 
     /// <summary>用户状态：1=正常、2=封禁、3=未验证。仅管理员可修改（不允许改自己）。</summary>
-    int? Status = null,
-
-    /// <summary>是否隐藏关注列表。</summary>
-    bool? IsFollowingListHidden = null
+    int? Status = null
 );
 
 public record PatchUserRequest(
@@ -46,10 +43,7 @@ public record PatchUserRequest(
     JsonElement? Extras = null,
 
     /// <summary>用户状态：1=正常、2=封禁、3=未验证。仅管理员可修改（不允许改自己）。</summary>
-    int? Status = null,
-
-    /// <summary>是否隐藏关注列表。</summary>
-    bool? IsFollowingListHidden = null
+    int? Status = null
 );
 
 public record ResendVerificationRequest(
@@ -104,9 +98,6 @@ public record UserResponse(
     DateTime CreatedAt,
     DateTime? EmailVerifiedAt,
     JsonElement? Extras,
-
-    /// <summary>是否隐藏自己的关注列表。</summary>
-    bool IsFollowingListHidden = false,
 
     /// <summary>
     /// 用户的最高权限级别（所属权限组中数值最小的 level，<strong>数值越小权限越高</strong>）。
@@ -163,7 +154,13 @@ public record MyPermissionsResponse(
     /// 当前用户的最高权限级别（所属权限组中数值最小的 level，<strong>数值越小权限越高</strong>）。
     /// 前端据此判断"能否管理某个用户/权限组"；真正的校验仍在服务端。
     /// </summary>
-    int Level = PermissionCodes.GroupLevel.NoGroup
+    int Level = PermissionCodes.GroupLevel.NoGroup,
+
+    /// <summary>
+    /// 拉取这份快照时的全局权限版本号。前端轮询
+    /// <c>/api/users/me/permissions/version</c>，发现版本变化即重新拉取。
+    /// </summary>
+    long Version = 0
 );
 
 /// <summary>

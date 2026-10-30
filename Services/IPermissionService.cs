@@ -43,11 +43,26 @@ public interface IPermissionService
     Task<SubsystemPermissionSyncResult> SyncSubsystemPermissionsAsync(
         ulong subsystemId, string subsystemCode, List<SubsystemPermissionItem>? items);
 
-    // ============ 缓存失效 ============
+    // ============ 缓存失效（版本号机制）============
+
+    /// <summary>
+    /// 全局失效权限缓存：递增权限作用域版本号，所有实例在
+    /// <c>Permissions:VersionCacheSeconds</c>（默认 1 秒）内感知，无需逐用户清理。
+    /// 任何影响「权限归属或授权」的写操作后都应调用一次。
+    /// </summary>
+    Task InvalidateAllPermissionCacheAsync();
+
+    /// <summary>
+    /// 失效指定用户的权限缓存。版本号机制下等价于 <see cref="InvalidateAllPermissionCacheAsync"/>，
+    /// 保留签名以兼容既有调用点（逐用户清理已无意义且会产生 O(N) 写放大）。
+    /// </summary>
     Task InvalidateUserPermissionCacheAsync(ulong userId);
 
-    /// <summary>批量失效用户权限缓存（子系统删除/权限删除后调用）。</summary>
+    /// <summary>批量失效用户权限缓存。版本号机制下等价于全局失效。</summary>
     Task InvalidateUsersPermissionCacheAsync(IEnumerable<ulong> userIds);
+
+    /// <summary>当前全局权限版本号；前端用它判断是否需要重新拉取权限集合。</summary>
+    Task<long> GetPermissionVersionAsync(CancellationToken ct = default);
 
     // ============ 种子数据 ============
     Task SeedPermissionsAndGroupsAsync();

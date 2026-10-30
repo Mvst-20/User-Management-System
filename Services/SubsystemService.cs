@@ -155,31 +155,21 @@ public sealed class SubsystemService : ISubsystemService
         if (entry is null)
             return false;
 
-        // 级联删除前先反查受影响用户（其所属用户组持有该子系统注册的权限），
-        // 删除落库后这些权限消失，必须失效对应缓存，否则已登录用户最长 5 分钟内仍持旧权限
-        var permissionIds = await _context.Permissions
+        // 该子系统注册的权限数（仅用于日志）
+        var permissionCount = await _context.Permissions
             .Where(p => p.SubsystemId == id)
-            .Select(p => p.Id)
-            .ToListAsync(ct);
-
-        var affectedUserIds = permissionIds.Count == 0
-            ? new List<ulong>()
-            : await _context.UserGroupPermissions
-                .Where(gp => permissionIds.Contains(gp.PermissionId))
-                .Join(_context.UserGroupMembers,
-                    gp => gp.GroupId,
-                    member => member.GroupId,
-                    (gp, member) => member.UserId)
-                .Distinct()
-                .ToListAsync(ct);
+            .CountAsync(ct);
 
         _context.Subsystems.Remove(entry);
         await _context.SaveChangesAsync(ct);
-        await _permissionService.InvalidateUsersPermissionCacheAsync(affectedUserIds);
+
+        // 级联删除后这些权限消失，递增权限版本号让所有实例立即感知，
+        // 无需先联表反查受影响的用户清单（原实现在多实例下也无法覆盖其他实例）。
+        await _permissionService.InvalidateAllPermissionCacheAsync();
 
         _logger.LogWarning(
-            "[SUBSYSTEM] Deleted {Code} (id={Id}), cascaded permissions={Permissions}, cache invalidated users={Users}",
-            entry.Code, entry.Id, permissionIds.Count, affectedUserIds.Count);
+            "[SUBSYSTEM] Deleted {Code} (id={Id}), cascaded permissions={Permissions}, permission version bumped",
+            entry.Code, entry.Id, permissionCount);
 
         return true;
     }

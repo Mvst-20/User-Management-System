@@ -1,9 +1,5 @@
+using ImageMagick;
 using Microsoft.AspNetCore.Mvc;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Jpeg;
-using SixLabors.ImageSharp.Formats.Png;
-using SixLabors.ImageSharp.Formats.Webp;
-using SixLabors.ImageSharp.Processing;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Extensions;
 using UserManagementSystem.Models;
@@ -87,54 +83,73 @@ public static class AvatarEndpoints
 
         sourceStream.Position = 0;
 
-        using var image = Image.Load(sourceStream);
+        using var images = new MagickImageCollection();
+        images.Read(sourceStream);
+
+        if (images.Count == 0)
+            throw new InvalidDataException("图片内容为空或无法解析");
+
+        var format = GetMagickFormat(extension);
 
         // 压缩原图：保持原始尺寸，降低质量
+        ApplyQuality(images, format);
         using var compressedStream = new MemoryStream();
-        SaveImage(image, compressedStream, extension);
+        images.Write(compressedStream, format);
         var compressedBytes = compressedStream.ToArray();
 
         // 如果压缩后反而更大，放弃压缩
         if (compressedBytes.Length >= originalSize)
             return (null, null);
 
-        // 生成缩略图：等比缩放，最大边长 256px
-        using var thumbImage = image.Clone(ctx => ctx.Resize(new ResizeOptions
+        // 生成缩略图：复制并展开动画帧后等比缩放，最大边长 256px
+        using var thumbnailImages = new MagickImageCollection();
+        foreach (var frame in images)
         {
-            Mode = ResizeMode.Max,
-            Size = new Size(ThumbnailMaxSize, ThumbnailMaxSize)
-        }));
+            thumbnailImages.Add(frame.Clone());
+        }
+
+        thumbnailImages.Coalesce();
+        foreach (var frame in thumbnailImages)
+        {
+            if (frame.Width > ThumbnailMaxSize || frame.Height > ThumbnailMaxSize)
+            {
+                frame.Resize(new MagickGeometry(ThumbnailMaxSize, ThumbnailMaxSize));
+            }
+        }
+
+        ApplyQuality(thumbnailImages, format);
+        thumbnailImages.Optimize();
 
         using var thumbStream = new MemoryStream();
-        SaveImage(thumbImage, thumbStream, extension);
+        thumbnailImages.Write(thumbStream, format);
         var thumbBytes = thumbStream.ToArray();
 
         return (compressedBytes, thumbBytes);
     }
 
     /// <summary>
-    /// 根据扩展名保存图片到流
+    /// 根据扩展名获取保存格式
     /// </summary>
-    private static void SaveImage(Image image, Stream stream, string extension)
+    private static MagickFormat GetMagickFormat(string extension) => extension.ToLowerInvariant() switch
     {
-        switch (extension.ToLower())
+        ".jpg" or ".jpeg" => MagickFormat.Jpeg,
+        ".png" => MagickFormat.Png,
+        ".gif" => MagickFormat.Gif,
+        ".webp" => MagickFormat.WebP,
+        _ => MagickFormat.Jpeg
+    };
+
+    /// <summary>
+    /// 为有损格式设置压缩质量
+    /// </summary>
+    private static void ApplyQuality(MagickImageCollection images, MagickFormat format)
+    {
+        if (format is not (MagickFormat.Jpeg or MagickFormat.WebP))
+            return;
+
+        foreach (var frame in images)
         {
-            case ".jpg":
-            case ".jpeg":
-                image.SaveAsJpeg(stream, new JpegEncoder { Quality = JpegQuality });
-                break;
-            case ".png":
-                image.SaveAsPng(stream, new PngEncoder { CompressionLevel = PngCompressionLevel.DefaultCompression });
-                break;
-            case ".gif":
-                image.SaveAsGif(stream);
-                break;
-            case ".webp":
-                image.SaveAsWebp(stream, new WebpEncoder { Quality = JpegQuality });
-                break;
-            default:
-                image.SaveAsJpeg(stream, new JpegEncoder { Quality = JpegQuality });
-                break;
+            frame.Quality = JpegQuality;
         }
     }
 
@@ -292,13 +307,7 @@ public static class AvatarEndpoints
                 return Results.Ok(new ApiResponse(ResultCodes.UploadAvatarSuccess, "头像上传成功",
                     new AvatarUploadDataResponse(user.AvatarUrl, hasThumbnail)));
             }
-            catch (UnknownImageFormatException ex)
-            {
-                logger.LogWarning(ex, "[AVATAR-UPLOAD] FAIL: unknown image format");
-                DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
-                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "不支持的图片格式或图片已损坏"));
-            }
-            catch (InvalidImageContentException ex)
+            catch (Exception ex) when (ex is MagickException or InvalidDataException)
             {
                 logger.LogWarning(ex, "[AVATAR-UPLOAD] FAIL: invalid image content");
                 DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");

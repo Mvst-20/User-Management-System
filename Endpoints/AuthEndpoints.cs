@@ -5,6 +5,7 @@ using UserManagementSystem.DTOs;
 using UserManagementSystem.Extensions;
 using UserManagementSystem.Models;
 using UserManagementSystem.Services;
+using UserManagementSystem.Services.Security;
 
 namespace UserManagementSystem.Endpoints;
 
@@ -108,8 +109,10 @@ public static class AuthEndpoints
             [FromBody] LoginRequest request,
             [FromServices] IUserService userService,
             [FromServices] IJwtService jwtService,
-            [FromServices] IRefreshTokenService refreshTokenService,
-            [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] ISessionService sessionService,
+            [FromServices] ILoginRiskEvaluator riskEvaluator,
+            [FromServices] ILoginAlertQueue alertQueue,
+            [FromServices] IIpLocationResolver locations,
             [FromServices] ISystemSettingService systemSettingService,
             [FromServices] IRateLimitService rateLimitService,
             [FromServices] AppConfiguration appConfig,
@@ -135,6 +138,7 @@ public static class AuthEndpoints
             if (await rateLimitService.GetCountAsync(accountKey) >= 5)
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
 
+            var device = DeviceInfoFactory.FromRequest(context, locations);
             var user = await userService.ValidateCredentialsAsync(request.Login, request.Password);
 
             if (user == null)
@@ -142,21 +146,37 @@ public static class AuthEndpoints
                 // 登录失败，递增限流计数
                 await rateLimitService.IncrementAsync(ipKey, TimeSpan.FromMinutes(5));
                 await rateLimitService.IncrementAsync(accountKey, TimeSpan.FromMinutes(5));
+
+                await sessionService.LogAsync(new LoginLog
+                {
+                    LoginIdentifier = request.Login,
+                    EventType = LoginLogEvents.Login,
+                    Success = false,
+                    FailReason = "用户名或密码错误",
+                    Ip = device.Ip,
+                    Location = device.Location,
+                    UserAgent = device.UserAgent,
+                    DeviceName = device.Name
+                });
+
                 return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_UserNotFound, "用户名或密码错误"));
             }
 
             if (user.Status == UserStatus.Deleted)
             {
+                await LogLoginRejectedAsync(sessionService, user, device, "账号不存在或已注销");
                 return Results.NotFound(new ApiResponse(ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销"));
             }
 
             if (user.Status == UserStatus.Banned)
             {
+                await LogLoginRejectedAsync(sessionService, user, device, "账号已被封禁");
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_AccountBanned, "账号已被封禁"), statusCode: 403);
             }
 
             if (user.Status == UserStatus.Unverified)
             {
+                await LogLoginRejectedAsync(sessionService, user, device, "账号未验证");
                 return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountUnverified, "账号未验证，请先验证邮箱"));
             }
 
@@ -164,20 +184,37 @@ public static class AuthEndpoints
             await rateLimitService.ResetAsync(ipKey);
             await rateLimitService.ResetAsync(accountKey);
 
+            // 风险判定必须在创建会话之前：历史集合只应包含此前登录过的设备与地点
+            var risks = await riskEvaluator.EvaluateAsync(user.Id, device);
+
+            // 创建会话：同类设备只保留最近一次登录，其余自动失效
+            var session = await sessionService.CreateSessionAsync(user, device);
+            var access = jwtService.GenerateToken(user, session.Session.Id);
+            await sessionService.SetLastJtiAsync(session.Session.Id, access.Jti);
+
             // 更新最后登录信息
-            user.LastLoginIp = context.Connection.RemoteIpAddress?.ToString();
+            user.LastLoginIp = device.Ip;
             user.LastLoginAt = DateTime.UtcNow;
             await userService.UpdateUserAsync(user);
 
-            // 标记用户在线
-            await onlineUserService.MarkUserOnlineAsync(user.Id.ToString());
+            await sessionService.LogAsync(new LoginLog
+            {
+                UserId = user.Id,
+                LoginIdentifier = request.Login,
+                EventType = LoginLogEvents.Login,
+                Success = true,
+                Ip = device.Ip,
+                Location = device.Location,
+                UserAgent = device.UserAgent,
+                DeviceName = device.Name,
+                SessionId = session.Session.Id
+            });
 
-            // 生成 Access Token 和 Refresh Token
-            var jwtToken = jwtService.GenerateToken(user);
-            var refreshToken = await refreshTokenService.GenerateAsync(user.Id);
+            EnqueueLoginAlert(alertQueue, appConfig, user, device, risks);
 
-            var loginData = new LoginDataResponse(jwtToken, "Bearer", appConfig.Jwt.ExpiryMinutes,
-                user.ToResponse(), refreshToken, 2592000); // 30 days
+            var refreshTokenSeconds = Math.Max(1, appConfig.Jwt.RefreshTokenDays) * 86400;
+            var loginData = new LoginDataResponse(access.Token, "Bearer", appConfig.Jwt.ExpiryMinutes,
+                user.ToResponse(), session.RefreshToken, refreshTokenSeconds);
 
             return Results.Ok(new ApiResponse(ResultCodes.LoginSuccess, "登录成功", loginData));
         });
@@ -185,10 +222,12 @@ public static class AuthEndpoints
         // 刷新 Access Token（使用 Refresh Token，无需重新登录）
         app.MapPost("/api/users/refresh", async (
             [FromBody] RefreshTokenRequest request,
-            [FromServices] IRefreshTokenService refreshTokenService,
+            [FromServices] ISessionService sessionService,
             [FromServices] IJwtService jwtService,
+            [FromServices] IIpLocationResolver locations,
             [FromServices] ISystemSettingService systemSettingService,
-            [FromServices] AppConfiguration appConfig) =>
+            [FromServices] AppConfiguration appConfig,
+            HttpContext context) =>
         {
             if (string.IsNullOrWhiteSpace(request.RefreshToken))
             {
@@ -201,17 +240,31 @@ public static class AuthEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放登录"), statusCode: 403);
             }
 
-            var user = await refreshTokenService.ValidateAsync(request.RefreshToken);
-            if (user == null)
+            var device = DeviceInfoFactory.FromRequest(context, locations);
+            var rotated = await sessionService.RotateAsync(request.RefreshToken, device);
+            if (rotated == null)
             {
                 return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "Refresh Token 无效或已过期"), statusCode: 401);
             }
 
-            var jwtToken = jwtService.GenerateToken(user);
-            var newRefreshToken = await refreshTokenService.GenerateAsync(user.Id);
+            var access = jwtService.GenerateToken(rotated.User, rotated.Session.Id);
+            await sessionService.SetLastJtiAsync(rotated.Session.Id, access.Jti);
 
-            var data = new LoginDataResponse(jwtToken, "Bearer", appConfig.Jwt.ExpiryMinutes,
-                user.ToResponse(), newRefreshToken, 2592000);
+            await sessionService.LogAsync(new LoginLog
+            {
+                UserId = rotated.User.Id,
+                EventType = LoginLogEvents.Refresh,
+                Success = true,
+                Ip = device.Ip,
+                Location = device.Location,
+                UserAgent = device.UserAgent,
+                DeviceName = device.Name,
+                SessionId = rotated.Session.Id
+            });
+
+            var refreshTokenSeconds = Math.Max(1, appConfig.Jwt.RefreshTokenDays) * 86400;
+            var data = new LoginDataResponse(access.Token, "Bearer", appConfig.Jwt.ExpiryMinutes,
+                rotated.User.ToResponse(), rotated.RefreshToken, refreshTokenSeconds);
 
             return Results.Ok(new ApiResponse(ResultCodes.LoginSuccess, "Token 已刷新", data));
         });
@@ -367,19 +420,19 @@ public static class AuthEndpoints
             return Results.Ok(new ApiResponse(ResultCodes.ChangeEmailConfirmSuccess, "邮箱修改成功"));
         });
 
-        // 用户登出
+        // 用户登出：只撤销当前设备会话，其他设备保持登录
         app.MapPost("/api/users/logout", async (
-            [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] ISessionService sessionService,
             [FromServices] ITokenBlacklistService tokenBlacklistService,
-            [FromServices] IRefreshTokenService refreshTokenService,
             [FromServices] AppConfiguration appConfig,
             HttpContext httpContext) =>
         {
             var userId = httpContext.User.GetUserId();
-            if (userId.HasValue)
+            var sessionId = httpContext.User.FindFirst(JwtClaimNames.SessionId)?.Value;
+
+            if (userId.HasValue && !string.IsNullOrEmpty(sessionId))
             {
-                await onlineUserService.MarkUserOfflineAsync(userId.Value.ToString());
-                await refreshTokenService.RevokeAsync(userId.Value);
+                await sessionService.RevokeSessionAsync(userId.Value, sessionId, SessionRevokeReasons.Logout);
             }
 
             // 撤销当前 Token
@@ -391,5 +444,55 @@ public static class AuthEndpoints
 
             return Results.Ok(new ApiResponse(ResultCodes.Success, "已登出"));
         }).RequireAuthorization().RequirePermission(PermissionCodes.UserLogout);
+
+        // ============ 内部辅助 ============
+
+        // 被拒登录的审计记录：写失败不影响返回
+        static Task LogLoginRejectedAsync(ISessionService sessionService, User user, DeviceInfo device, string reason)
+            => sessionService.LogAsync(new LoginLog
+            {
+                UserId = user.Id,
+                LoginIdentifier = user.Username,
+                EventType = LoginLogEvents.Login,
+                Success = false,
+                FailReason = reason,
+                Ip = device.Ip,
+                Location = device.Location,
+                UserAgent = device.UserAgent,
+                DeviceName = device.Name
+            });
+
+        // 命中风险时异步入队提醒；登录响应不等待邮件发送
+        static void EnqueueLoginAlert(
+            ILoginAlertQueue alertQueue,
+            AppConfiguration appConfig,
+            User user,
+            DeviceInfo device,
+            IReadOnlyList<string> risks)
+        {
+            if (risks.Count == 0 || string.IsNullOrWhiteSpace(user.Email))
+            {
+                return;
+            }
+
+            var enabled = risks.Where(risk => risk == LoginRiskKinds.NewDevice
+                ? appConfig.Security.AlertOnNewDevice
+                : appConfig.Security.AlertOnNewLocation).ToList();
+
+            if (enabled.Count == 0)
+            {
+                return;
+            }
+
+            alertQueue.TryEnqueue(new LoginAlertMessage(
+                user.Id,
+                user.Username,
+                user.Email,
+                enabled,
+                device.Name,
+                device.Ip,
+                device.Location,
+                DateTime.UtcNow));
+        }
     }
 }

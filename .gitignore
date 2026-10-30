@@ -374,5 +374,8 @@ FodyWeavers.xsd
 # 本地 IDE / AI 助手数据
 /.codebuddy/
 
+# Playwright CLI 调试产物
+/.playwright-cli/
+
 # 运行时上传的用户头像
 /wwwroot/avatars/

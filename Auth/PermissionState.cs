@@ -26,8 +26,18 @@ public sealed class PermissionState
     /// </summary>
     public int Level { get; private set; } = PermissionCodes.GroupLevel.NoGroup;
 
+    /// <summary>
+    /// 本快照对应的全局权限版本号。与
+    /// <c>/api/users/me/permissions/version</c> 的返回值不一致时说明权限已变更，
+    /// 需要重新拉取（见 <c>MainLayout</c> 的轮询逻辑）。
+    /// </summary>
+    public long Version { get; private set; }
+
     /// <summary>设置有效权限集合与权限级别。</summary>
-    public void Set(IEnumerable<string> codes, int level = PermissionCodes.GroupLevel.NoGroup)
+    public void Set(
+        IEnumerable<string> codes,
+        int level = PermissionCodes.GroupLevel.NoGroup,
+        long version = 0)
     {
         _codes.Clear();
         foreach (var code in codes)
@@ -39,6 +49,7 @@ public sealed class PermissionState
         }
 
         Level = level;
+        Version = version;
         Loaded = true;
         Changed?.Invoke();
     }
@@ -49,6 +60,7 @@ public sealed class PermissionState
         var had = _codes.Count > 0;
         _codes.Clear();
         Level = PermissionCodes.GroupLevel.NoGroup;
+        Version = 0;
         Loaded = false;
         if (had)
         {

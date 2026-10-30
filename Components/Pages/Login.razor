@@ -119,7 +119,7 @@
                 // 漏传会让 Permissions.Loaded 变 true 但 Level 仍是 int.MaxValue，
                 // 于是所有 CanManageGroup/CanManageUser 判定恒为 false（按钮全灰），
                 // 且 MainLayout 因 Loaded==true 提前返回、永不修正
-                Permissions.Set(data.Codes, data.Level);
+                Permissions.Set(data.Codes, data.Level, data.Version);
             }
 
             var target = string.IsNullOrWhiteSpace(ReturnUrl) || !ReturnUrl.StartsWith('/') ? "/" : ReturnUrl;

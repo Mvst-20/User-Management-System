@@ -81,12 +81,12 @@ public static class WebApplicationExtensions
             .AllowAnonymous();
 
         app.MapAuthEndpoints();
+        app.MapSessionEndpoints();
         app.MapUserProfileEndpoints();
         app.MapAvatarEndpoints();
         app.MapAdminEndpoints();
         app.MapPermissionEndpoints();
         app.MapUserGroupEndpoints();
-        app.MapFollowEndpoints();
         app.MapSystemSettingEndpoints();
         app.MapSmtpConfigEndpoints();
         app.MapSubsystemEndpoints();

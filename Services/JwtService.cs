@@ -7,6 +7,13 @@ using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Services;
 
+/// <summary>JWT 中的自定义声明名。</summary>
+public static class JwtClaimNames
+{
+    /// <summary>会话标识：指向 <c>user_sessions.id</c>，用于会话级撤销。</summary>
+    public const string SessionId = "sid";
+}
+
 public class JwtService : IJwtService
 {
     private readonly AppConfiguration _appConfig;
@@ -16,27 +23,35 @@ public class JwtService : IJwtService
         _appConfig = appConfig;
     }
 
-    public string GenerateToken(User user)
+    public AccessTokenResult GenerateToken(User user, string? sessionId = null)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_appConfig.Jwt.Key));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
-        var claims = new[]
+        var jti = Guid.NewGuid().ToString();
+        var expiresAt = DateTime.UtcNow.AddMinutes(_appConfig.Jwt.ExpiryMinutes);
+
+        var claims = new List<Claim>
         {
-            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            new Claim(ClaimTypes.Name, user.Username),
-            new Claim(ClaimTypes.Email, user.Email),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new(ClaimTypes.Name, user.Username),
+            new(ClaimTypes.Email, user.Email),
+            new(JwtRegisteredClaimNames.Jti, jti)
         };
+
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            claims.Add(new Claim(JwtClaimNames.SessionId, sessionId));
+        }
 
         var token = new JwtSecurityToken(
             issuer: _appConfig.Jwt.Issuer,
             audience: _appConfig.Jwt.Audience,
             claims: claims,
-            expires: DateTime.UtcNow.AddMinutes(_appConfig.Jwt.ExpiryMinutes),
+            expires: expiresAt,
             signingCredentials: credentials
         );
 
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        return new AccessTokenResult(new JwtSecurityTokenHandler().WriteToken(token), jti, expiresAt);
     }
 }

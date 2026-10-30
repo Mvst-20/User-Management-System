@@ -6,6 +6,7 @@
 @inject UcsApiClient Api
 @inject TokenStore Tokens
 @inject PermissionState Permissions
+@inject ModalService ModalSvc
 
 <PageTitle>用户管理 · UCS 管理控制台</PageTitle>
 
@@ -64,23 +65,58 @@
                 <Column TData="UserResponse" Title="最后登录">@FormatTime(context.LastLoginAt)</Column>
                 <Column TData="UserResponse" Title="注册时间">@FormatTime(context.CreatedAt)</Column>
                 <Column TData="UserResponse" Title="操作">
-                    <Space>
-                        <PermissionGate Code="@PermissionCodes.UserUpdate">
-                            <Button OnClick="@(() => OpenEditAsync(context))" Disabled="@(!CanOperate(context))">编辑</Button>
-                        </PermissionGate>
-                        <PermissionGate Code="@PermissionCodes.UserGroupManageMembers">
-                            <Button OnClick="@(() => OpenGroupsAsync(context))" Disabled="@(!CanAssignGroups(context))">权限组</Button>
-                        </PermissionGate>
-                        <PermissionGate Code="@PermissionCodes.UserResetPassword">
-                            <Button OnClick="@(() => OpenResetAsync(context))" Disabled="@(!CanOperate(context))">重置密码</Button>
-                        </PermissionGate>
-                        <PermissionGate Code="@PermissionCodes.UserDelete">
-                            <Popconfirm Title="@DeleteConfirmText(context)"
-                                        OnConfirm="@(_ => DeleteAsync(context))">
-                                <Button Danger="true" Disabled="@(!CanDelete(context))">删除</Button>
-                            </Popconfirm>
-                        </PermissionGate>
-                    </Space>
+                    <PermissionGate AnyOf="@(new[]
+                                             {
+                                                 PermissionCodes.UserUpdate,
+                                                 PermissionCodes.UserGroupManageMembers,
+                                                 PermissionCodes.UserResetPassword,
+                                                 PermissionCodes.UserDelete
+                                             })">
+                        <Dropdown Trigger="@(new[] { Trigger.Click })" Placement="@Placement.BottomRight">
+                            <Overlay>
+                                <Menu>
+                                    <PermissionGate Code="@PermissionCodes.UserUpdate">
+                                        <MenuItem Key="edit"
+                                                  OnClick="@(() => OpenEditAsync(context))"
+                                                  Disabled="@(!CanOperate(context))">
+                                            <UiIcon Name="pencil" Size="14" />
+                                            <span>编辑</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                    <PermissionGate Code="@PermissionCodes.UserGroupManageMembers">
+                                        <MenuItem Key="groups"
+                                                  OnClick="@(() => OpenGroupsAsync(context))"
+                                                  Disabled="@(!CanAssignGroups(context))">
+                                            <UiIcon Name="users" Size="14" />
+                                            <span>权限组</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                    <PermissionGate Code="@PermissionCodes.UserResetPassword">
+                                        <MenuItem Key="reset-password"
+                                                  OnClick="@(() => OpenResetAsync(context))"
+                                                  Disabled="@(!CanOperate(context))">
+                                            <UiIcon Name="refresh-cw" Size="14" />
+                                            <span>重置密码</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                    <PermissionGate Code="@PermissionCodes.UserDelete">
+                                        <MenuItem Key="delete"
+                                                  OnClick="@(() => ConfirmDeleteAsync(context))"
+                                                  Disabled="@(!CanDelete(context))">
+                                            <UiIcon Name="trash" Size="14" />
+                                            <span>删除</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                </Menu>
+                            </Overlay>
+                            <ChildContent>
+                                <button type="button" class="ucs-row-actions-trigger" title="更多操作"
+                                        aria-label="更多操作">
+                                    <UiIcon Name="ellipsis" Size="16" />
+                                </button>
+                            </ChildContent>
+                        </Dropdown>
+                    </PermissionGate>
                 </Column>
             </Table>
         </Card>
@@ -221,12 +257,6 @@
                         <textarea class="ucs-native-textarea" @bind="_editExtras"
                                   placeholder='JSON 格式，留空表示不修改。例如 {"dept":"研发部"}'></textarea>
                     </div>
-                    <div class="ucs-field">
-                        <Checkbox Checked="_editFollowHidden"
-                                  CheckedChanged="@(isChecked => _editFollowHidden = isChecked)">
-                            隐藏关注列表
-                        </Checkbox>
-                    </div>
                 </div>
             }
         </Modal>
@@ -318,7 +348,6 @@
     private string _editPhone = string.Empty;
     private string _editStatus = "1";
     private string _editExtras = string.Empty;
-    private bool _editFollowHidden;
     private string? _editAvatarUrl;
     private bool _avatarBusy;
 
@@ -541,7 +570,6 @@
         _editEmail = user.Email;
         _editPhone = user.Phone ?? string.Empty;
         _editStatus = user.Status.ToString();
-        _editFollowHidden = user.IsFollowingListHidden;
         _editAvatarUrl = user.AvatarUrl;
         _editExtras = user.Extras is { } extras && extras.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)
             ? extras.GetRawText()
@@ -585,8 +613,7 @@
                 email = string.IsNullOrWhiteSpace(_editEmail) ? null : _editEmail.Trim(),
                 phone = string.IsNullOrWhiteSpace(_editPhone) ? null : _editPhone.Trim(),
                 extras,
-                status = int.TryParse(_editStatus, out var status) ? status : (int?)null,
-                isFollowingListHidden = _editFollowHidden
+                status = int.TryParse(_editStatus, out var status) ? status : (int?)null
             };
 
             var result = await Api.PutAsync<UserResponse>($"/api/users/{_editing.Id}", body);
@@ -826,6 +853,22 @@
     }
 
     // ============ 删除 ============
+
+    private async Task ConfirmDeleteAsync(UserResponse user)
+    {
+        var confirmed = await ModalSvc.ConfirmAsync(new ConfirmOptions
+        {
+            Title = "删除用户",
+            Content = DeleteConfirmText(user),
+            OkText = "删除",
+            CancelText = "取消"
+        });
+
+        if (confirmed)
+        {
+            await DeleteAsync(user);
+        }
+    }
 
     private async Task DeleteAsync(UserResponse user)
     {

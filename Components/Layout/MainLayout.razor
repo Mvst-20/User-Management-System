@@ -4,6 +4,7 @@
 @inject UcsApiClient Api
 @inject PermissionState Permissions
 @inject NavigationManager Navigation
+@inject UserManagementSystem.Configuration.AppConfiguration AppConfig
 
 @* 仅当确认已登录后才渲染外壳。
    AuthorizeRouteView 会把「鉴权中 / 未授权」片段一并放进本布局渲染，
@@ -57,6 +58,9 @@
     /// <summary>侧栏标题：取自系统设置中的站点名称（获取失败时回落到 UCS）。</summary>
     private string _siteName = "UCS";
 
+    /// <summary>权限版本轮询的取消源；circuit 销毁时取消，避免后台任务泄漏。</summary>
+    private CancellationTokenSource? _pollCts;
+
     /// <summary>
     /// 在 SSR（预渲染）阶段即获取站点名称，使首次渲染就显示真实名称，
     /// 避免"先显示默认 UCS、加载完成后再替换"的闪烁。
@@ -72,6 +76,78 @@
 
         Api.SessionExpired += OnSessionExpired;
         await EnsurePermissionsLoadedAsync();
+        StartPermissionPolling();
+    }
+
+    /// <summary>
+    /// 启动权限版本轮询：管理员改权限后，各实例的权限版本号立即变化，
+    /// 前端在 <c>Permissions:ClientPollSeconds</c>（默认 30s）内发现并重新拉取，
+    /// 从而让菜单与按钮自动显隐，无需用户刷新页面。
+    /// </summary>
+    private void StartPermissionPolling()
+    {
+        var seconds = AppConfig.Permissions.ClientPollSeconds;
+        if (seconds <= 0 || _pollCts != null)
+        {
+            return;
+        }
+
+        _pollCts = new CancellationTokenSource();
+        _ = PollPermissionVersionAsync(TimeSpan.FromSeconds(seconds), _pollCts.Token);
+    }
+
+    private async Task PollPermissionVersionAsync(TimeSpan interval, CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(interval);
+
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                if (!Permissions.Loaded)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var latest = await Api.GetPermissionVersionAsync(ct);
+                    if (!latest.Success || latest.Data is null)
+                    {
+                        // 会话失效：停止轮询，跳转由 SessionExpired 事件负责
+                        if (latest.Code == ResultCodes.Unauthorized)
+                        {
+                            return;
+                        }
+
+                        continue;
+                    }
+
+                    if (latest.Data.Version == Permissions.Version)
+                    {
+                        continue;
+                    }
+
+                    var refreshed = await Api.GetEffectivePermissionsAsync(ct);
+                    if (refreshed.Success && refreshed.Data is { } data)
+                    {
+                        await InvokeAsync(() => Permissions.Set(data.Codes, data.Level, data.Version));
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch
+                {
+                    // 轮询是尽力而为：单次失败不打断用户操作，下一轮继续
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常关闭
+        }
     }
 
     private async Task EnsureSiteInfoLoadedAsync()
@@ -101,7 +177,7 @@
         var result = await Api.GetEffectivePermissionsAsync();
         if (result.Success && result.Data is { } data)
         {
-            Permissions.Set(data.Codes, data.Level);
+            Permissions.Set(data.Codes, data.Level, data.Version);
         }
         else if (result.Code == ResultCodes.Unauthorized)
         {
@@ -109,10 +185,17 @@
         }
     }
 
+    public void Dispose()
+    {
+        Api.SessionExpired -= OnSessionExpired;
+
+        _pollCts?.Cancel();
+        _pollCts?.Dispose();
+        _pollCts = null;
+    }
+
     private void OnSessionExpired()
         => _ = InvokeAsync(() => Navigation.NavigateTo("/login?expired=1", replace: true));
 
     private void ToggleCollapsed() => _collapsed = !_collapsed;
-
-    public void Dispose() => Api.SessionExpired -= OnSessionExpired;
 }

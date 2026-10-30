@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using UserManagementSystem.Data;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Models;
@@ -9,23 +8,27 @@ namespace UserManagementSystem.Services;
 public class UserService : IUserService
 {
     private readonly ApplicationDbContext _context;
-    private readonly IOnlineUserService _onlineUserService;
+    private readonly ISessionService _sessionService;
     private readonly IPermissionService _permissionService;
-    private readonly IMemoryCache _cache;
+    private readonly ICacheVersionService _cacheVersionService;
 
-    public UserService(ApplicationDbContext context, IOnlineUserService onlineUserService, IPermissionService permissionService, IMemoryCache cache)
+    public UserService(
+        ApplicationDbContext context,
+        ISessionService sessionService,
+        IPermissionService permissionService,
+        ICacheVersionService cacheVersionService)
     {
         _context = context;
-        _onlineUserService = onlineUserService;
+        _sessionService = sessionService;
         _permissionService = permissionService;
-        _cache = cache;
+        _cacheVersionService = cacheVersionService;
     }
 
     /// <summary>
-    /// OnTokenValidated 中的用户状态缓存键（短 TTL）。
-    /// 用户状态发生变更（删除/封禁）时必须清除对应缓存。
+    /// 鉴权链路中的用户状态缓存键。键内嵌 <c>user_status</c> 作用域版本号，
+    /// 状态变更时只需递增版本号，所有实例的旧键随之失效。
     /// </summary>
-    public static string UserStatusCacheKey(ulong userId) => $"user_status_{userId}";
+    public static string UserStatusCacheKey(long version, ulong userId) => $"status:v{version}:user:{userId}";
 
     public async Task<User?> GetByIdAsync(ulong id)
     {
@@ -47,8 +50,22 @@ public class UserService : IUserService
 
     public async Task<User> UpdateUserAsync(User user)
     {
+        // 仅当状态真正变化时才递增版本号：登录成功也会走本方法更新 LastLoginAt，
+        // 若无条件 bump 会造成每次登录都全局失效一次（写放大）。
+        var previousStatus = await _context.Users
+            .AsNoTracking()
+            .Where(u => u.Id == user.Id)
+            .Select(u => (UserStatus?)u.Status)
+            .FirstOrDefaultAsync();
+
         _context.Users.Update(user);
         await _context.SaveChangesAsync();
+
+        if (previousStatus.HasValue && previousStatus.Value != user.Status)
+        {
+            await _cacheVersionService.BumpAsync(CacheScopes.UserStatus);
+        }
+
         return user;
     }
 
@@ -65,9 +82,9 @@ public class UserService : IUserService
         user.DeletedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync();
 
-        // 清除被删除用户的权限缓存与状态缓存
-        await _permissionService.InvalidateUserPermissionCacheAsync(id);
-        _cache.Remove(UserStatusCacheKey(id));
+        // 递增权限与用户状态版本号，所有实例立即感知
+        await _permissionService.InvalidateAllPermissionCacheAsync();
+        await _cacheVersionService.BumpAsync(CacheScopes.UserStatus);
 
         return true;
     }
@@ -108,10 +125,11 @@ public class UserService : IUserService
         return (users, totalCount);
     }
 
-    public async Task<int> GetOnlineUsersCountAsync()
-    {
-        return await _onlineUserService.GetOnlineUsersCountAsync();
-    }
+    /// <summary>
+    /// 在线用户数：由会话的最近活跃时间派生（30 分钟内的活跃会话去重用户数），
+    /// 取代原 online_users 表——那张表一个用户只有一行，无法表达多设备。
+    /// </summary>
+    public Task<int> GetOnlineUsersCountAsync() => _sessionService.GetOnlineUserCountAsync();
 
     public async Task<int> GetTotalUsersCountAsync()
     {

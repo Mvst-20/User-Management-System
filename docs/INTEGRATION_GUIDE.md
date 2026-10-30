@@ -26,7 +26,6 @@ UCS（User Management System）是一个统一的用户管理与权限中心，�
 - **JWT 认证** — 签发 Access Token + Refresh Token，无状态水平扩展
 - **RBAC 权限模型** — 用户 → 权限组 → 权限 的三层关联，支持 ABC 三级特殊权限
 - **批量权限检查** — 一次请求检查多条权限，适合子系统页面/接口级鉴权
-- **关注系统** — 用户关注/粉丝、可见性控制
 - **系统设置** — 站点信息、友情链接、运行时配置
 
 ### 架构简图
@@ -194,10 +193,14 @@ Content-Type: application/json
       "extras": null
     },
     "refreshToken": "a1b2c3d4e5f6...",
-    "refreshTokenExpiresIn": 2592000   // 30 天（秒）
+    "refreshTokenExpiresIn": 2592000   // = Jwt.RefreshTokenDays × 86400，默认 30 天（秒）
   }
 }
 ```
+
+> **多设备登录**：同一账号可在多台设备同时在线。系统按「浏览器 + 操作系统」归类设备，
+> 同一类设备再次登录会顶掉该设备上更早的会话（`replaced_by_new_device`），其他设备不受影响。
+> 因此**不要**在客户端把「登录成功」当成「其他端已下线」。
 
 > **登录失败次数**：同一 IP 5 分钟内失败 20 次、或同一账号 5 分钟内失败 5 次会被临时限流（HTTP 429）；
 > 登录成功会立即清零计数。详见 [8. 速率限制](#8-速率限制)。
@@ -215,7 +218,8 @@ Content-Type: application/json
 
 响应格式与登录相同，返回新的 `token` 和 `refreshToken`。
 
-> **重要**：Refresh Token 轮换后旧 token 立即失效，不可重用。
+> **重要**：Refresh Token 每次刷新都会轮换，旧值立即失效，不可重用。
+> 若旧值被再次提交，系统判定为**令牌复用**，会撤销整条会话并写安全日志，此时必须重新登录。
 
 #### 登出
 
@@ -226,7 +230,8 @@ Authorization: Bearer <access_token>
 
 权限：`user:logout`（需认证 + 该权限）
 
-登出会撤销 Refresh Token、将当前 Access Token 加入黑名单，并把用户标记为离线。
+登出只撤销**当前设备**的会话并把当前 Access Token 加入黑名单，其他设备保持登录。
+若需要「一键下线所有设备」，改用 `DELETE /api/users/me/sessions`（见 [3.4 多设备会话](#34-多设备会话)）。
 
 ### 3.3 Token 生命周期
 
@@ -247,6 +252,32 @@ Refresh 过期 ──► 需重新登录
 2. 每次请求前检查 Access Token 是否即将过期（如剩余 < 5 分钟）
 3. 若即将过期，调用 `/api/users/refresh` 刷新
 4. 请求返回 401 时，尝试刷新；刷新失败则跳转登录页
+
+### 3.4 多设备会话
+
+一次登录 = 一条会话（一台设备）。Access Token 携带 `sid` 声明指向会话，因此可以精确撤销某一台设备。
+
+**撤销何时生效**
+
+| 令牌类型 | 生效方式 | 生效时间 |
+|---------|---------|---------|
+| 带 `sid` 的令牌 | 鉴权时校验会话有效性 | ≤ `Security:SessionValidationCacheSeconds`（默认 5 秒） |
+| 升级前签发、无 `sid` 的令牌 | `last_jti` 写入 JWT 黑名单 | 立即 |
+
+会触发撤销的场景：登出、被用户或管理员踢出、同设备新登录顶替、修改密码、管理员重置密码、封禁、注销、令牌复用。
+
+**相关端点（均需认证）**
+
+| 方法 | 路径 | 说明 | 所需权限 |
+|------|------|------|---------|
+| GET | `/api/users/me/sessions` | 本人在线设备列表，`isCurrent` 标记当前设备 | `session:read` |
+| DELETE | `/api/users/me/sessions/{sessionId}` | 踢出本人指定设备 | `session:revoke` |
+| DELETE | `/api/users/me/sessions` | 踢出本人除当前设备外的全部会话 | `session:revoke` |
+| GET | `/api/users/me/login-history` | 本人登录历史（`page`、`pageSize`、`success`、`eventType`） | `login-history:read` |
+| GET | `/api/admin/users/{id}/sessions` | 查看指定用户的设备 | `user:read` |
+| DELETE | `/api/admin/users/{id}/sessions/{sessionId}` | 踢出指定用户的某个设备 | `user:update` |
+
+登录历史的 `eventType` 取值：`login`（登录）、`refresh`（令牌刷新）、`logout`（登出）、`revoked`（被踢下线，含被顶替、封禁、改密、复用）。按时间倒序返回，默认保留 180 天（可配 `Security:LoginHistoryRetentionDays`）。
 
 ---
 
@@ -287,6 +318,9 @@ Refresh 过期 ──► 需重新登录
 | `user:change-email` | 修改邮箱 |
 | `user:logout` | 登出 |
 | `user:reset-password` | 重置指定用户密码（管理员操作） |
+| `session:read` | 查看本人的登录设备 |
+| `session:revoke` | 踢出本人的指定设备或全部其他设备 |
+| `login-history:read` | 查看本人的登录历史 |
 | `avatar:upload` | 上传头像 |
 | `avatar:delete` | 删除头像 |
 | `admin:stats` | 查看统计数据 |
@@ -301,9 +335,6 @@ Refresh 过期 ──► 需重新登录
 | `user-group:delete` | 删除权限组 |
 | `user-group:manage-members` | 管理权限组成员 |
 | `user-group:manage-permissions` | 管理权限组权限 |
-| `follow:user` | 关注用户 |
-| `follow:read` | 查看关注信息 |
-| `follow:manage` | 管理关注可见性 |
 | `system-setting:read` | 查看系统设置 |
 | `system-setting:update` | 更新系统设置 |
 | `smtp:read` | 查看邮件（SMTP）配置 |
@@ -400,8 +431,7 @@ Content-Type: application/json
   "email": "new@example.com",
   "phone": "13800138000",
   "extras": { "department": "Engineering" },
-  "status": 1,
-  "isFollowingListHidden": false
+  "status": 1
 }
 ```
 
@@ -411,7 +441,6 @@ Content-Type: application/json
 | `email` | **仅管理员可为他人修改**；改自己须走 `/api/users/{id}/change-email`，否则返回 `612`。修改后 `emailVerifiedAt` 被清空 |
 | `extras` | 任意 JSON，整体覆盖 |
 | `status` | `1`=正常、`2`=封禁、`3`=未验证。**仅管理员可为他人修改**（改自己返回 `616`）；不接受 `4`（已删除，请使用删除接口）。管理员可借此**解封**被封禁账号 |
-| `isFollowingListHidden` | 是否隐藏自己的关注列表 |
 | 头像 | 不在本接口：`POST /api/users/{id}/avatar`（multipart，字段 `file`，≤6MB，需 `avatar:upload`）与 `DELETE /api/users/{id}/avatar`（需 `avatar:delete`） |
 
 > **未传的字段保持不变**（`null` 表示不修改），不是整体替换。
@@ -740,22 +769,6 @@ Content-Type: application/json
 > `GET /api/permissions` 会为每条权限返回 `subsystemId` 与 `subsystemName`，便于区分权限来源。
 
 ---
-
-### 5.6 关注系统
-
-| 方法 | 路径 | 权限 | 说明 |
-|------|------|------|------|
-| POST | `/api/users/{userId}/follow` | `follow:user` | 关注用户 |
-| DELETE | `/api/users/{userId}/follow` | `follow:user` | 取消关注 |
-| GET | `/api/users/{userId}/follow/status` | `follow:read` | 检查是否已关注 |
-| GET | `/api/users/me/following?page=1&pageSize=10` | `follow:read` | 我的关注列表 |
-| GET | `/api/users/me/followers?page=1&pageSize=10` | `follow:read` | 我的粉丝列表 |
-| GET | `/api/users/{userId}/following` | `follow:read` | 指定用户的关注列表 |
-| GET | `/api/users/{userId}/followers` | `follow:read` | 指定用户的粉丝列表 |
-| GET | `/api/users/{userId}/follow/stats` | `follow:read` | 关注统计 |
-| GET | `/api/users/me/follow/stats` | `follow:read` | 我的关注统计 |
-| PUT | `/api/users/me/following/visibility` | `follow:manage` | 设置关注列表可见性 `{ "isHidden": true }` |
-| GET | `/api/users/me/following/visibility` | `follow:manage` | 获取可见性设置 |
 
 ---
 
@@ -1188,7 +1201,11 @@ curl -X PUT https://api.example.com/api/subsystems/self/permissions \
 
 **Q：权限变更后多久生效？**
 
-权限缓存默认 5 分钟。调用 `DELETE /api/users/{id}` 或设置权限组权限后会主动清除缓存，实时生效。
+权限缓存采用**全局版本号**：任何权限写操作（改权限组权限、增删成员、增删权限、改用户状态）都会把版本号自增，
+所有实例在 `Permissions:VersionCacheSeconds`（默认 1 秒）内读到新版本并自动回源查库。
+
+也就是说**约 1 秒后**即可拿到新结果，不再依赖缓存 TTL 到期，也无需重启任何实例。
+管理控制台打开着的页面会在 `Permissions:ClientPollSeconds`（默认 30 秒）内自动刷新菜单与按钮。
 
 **Q：可以自定义权限码吗？**
 
@@ -1208,7 +1225,7 @@ curl -X PUT https://api.example.com/api/subsystems/self/permissions \
 
 **Q：管理员忘记用户密码怎么办？**
 
-拥有 `user:reset-password` 权限的管理员可调用 `POST /api/admin/users/{id}/reset-password`；请求体不传 `newPassword` 时服务端生成随机密码并**一次性返回**。重置后该用户的 Refresh Token 会被撤销并标记离线，需用新密码重新登录。
+拥有 `user:reset-password` 权限的管理员可调用 `POST /api/admin/users/{id}/reset-password`；请求体不传 `newPassword` 时服务端生成随机密码并**一次性返回**。重置后该用户**所有设备**上的会话都会被撤销，已签发的 Access Token 立即失效，需用新密码重新登录。
 
 **Q：`GET /api/users/me/permissions` 返回的权限码可以直接用于鉴权判断吗？**
 

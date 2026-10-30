@@ -21,6 +21,11 @@ public static class PermissionCodes
     public const string UserLogout = "user:logout";
     public const string UserResetPassword = "user:reset-password";
 
+    // ============ 会话与登录审计（自助能力，普通用户默认持有）============
+    public const string SessionRead = "session:read";
+    public const string SessionRevoke = "session:revoke";
+    public const string LoginHistoryRead = "login-history:read";
+
     // ============ 头像相关 ============
     public const string AvatarUpload = "avatar:upload";
     public const string AvatarDelete = "avatar:delete";
@@ -42,11 +47,6 @@ public static class PermissionCodes
     public const string UserGroupDelete = "user-group:delete";
     public const string UserGroupManageMembers = "user-group:manage-members";
     public const string UserGroupManagePermissions = "user-group:manage-permissions";
-
-    // ============ 关注相关 ============
-    public const string FollowUser = "follow:user";
-    public const string FollowRead = "follow:read";
-    public const string FollowManage = "follow:manage";
 
     // ============ 系统设置相关 ============
     public const string SystemSettingRead = "system-setting:read";

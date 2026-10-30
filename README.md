@@ -1,22 +1,22 @@
 # User Management System
 
-基于 ASP.NET Core 8 Minimal API 与 MySQL 8.0 的用户管理系统（UCS/UMS）。提供用户认证、权限管理、关注关系、系统设置、邮件配置、子系统凭证签发，并内置基于 Blazor Server 的管理控制台。
+基于 ASP.NET Core 8 Minimal API 与 MySQL 8.0 的用户管理系统（UCS/UMS）。提供用户认证、权限管理、系统设置、邮件配置、子系统凭证签发，并内置基于 Blazor Server 的管理控制台。
 
 ## 能力范围
 
 | 模块 | 内容 |
 |------|------|
-| 用户认证 | JWT Bearer；Refresh Token 免密刷新；邮箱验证与邮箱变更 |
+| 用户认证 | JWT Bearer（含 `sid`）；多设备会话免密刷新；邮箱验证与邮箱变更 |
+| 账户安全 | 登录设备查看与踢出；登录历史审计；新设备/异地登录邮件提醒 |
 | 口令 | BCrypt 哈希（Work Factor 12） |
 | 权限 | 权限组 → 权限；A/B/C 特殊权限覆盖；权限组 level 层级 |
-| 用户关注 | 关注/取关、关注与粉丝列表、可见性设置 |
 | 头像 | 上传/下载/删除；魔数校验；大图压缩与缩略图 |
 | 系统管理 | 站点信息、LOGO、友链、登录/注册开关 |
 | 服务器监控 | CPU/内存/网络/运行时间采样；指标 60s 落库，保留 8 天 |
 | 邮件 | SMTP 配置存库并加密；测试发信 |
 | 子系统凭证 | 签发 API Key；Secret 仅存 SHA256；子系统自注册权限（强制前缀） |
 | 管理控制台 | Blazor Web App（Interactive Server）+ Ant Design Blazor |
-| 后台任务 | 定时清理过期 Token、黑名单、限流与在线记录 |
+| 后台任务 | 定时清理过期 Token、黑名单、限流记录、失效会话与登录日志 |
 | 初始化 | 首次启动自动建表、写入权限与权限组种子、创建初始账号 |
 
 ## 技术栈
@@ -27,7 +27,7 @@
 - MySQL 8.0
 - JWT Bearer Authentication + 子系统 API Key 认证方案
 - ASP.NET Core Data Protection（SMTP 口令加密）
-- MailKit、BCrypt.Net-Next、SixLabors.ImageSharp
+- MailKit、BCrypt.Net-Next、Magick.NET
 - Serilog.AspNetCore
 
 ## 运行环境要求
@@ -117,10 +117,18 @@ SMTP 配置存于数据库，通过管理控制台「邮件服务」页面维护
     "Key": "<至少 64 字符的随机字符串>",
     "Issuer": "UserManagementAPI",
     "Audience": "UserManagementClient",
-    "ExpiryMinutes": 120
+    "ExpiryMinutes": 120,
+    "RefreshTokenDays": 30
   }
 }
 ```
+
+| 键 | 说明 |
+|----|------|
+| `ExpiryMinutes` | Access Token 有效期（分钟） |
+| `RefreshTokenDays` | 会话（Refresh Token）有效期（天数），默认 30 |
+
+- Access Token 携带 `sid` 声明指向登录会话；会话被撤销（登出、踢出、封禁）后，该 Token 会在数秒内失效，无需等待过期。
 
 ### 4. CORS
 
@@ -145,7 +153,10 @@ SMTP 配置存于数据库，通过管理控制台「邮件服务」页面维护
 }
 ```
 
-用于生成验证邮件链接。生产环境应使用 HTTPS 地址。
+用于生成验证邮件中的链接（用户点击后回到本服务）。生产环境应使用 HTTPS 地址。
+
+- 该项**只影响邮件链接**，与管理控制台的回环调用无关（回环地址自动解析，见第 6 节）。
+- 若邮箱验证功能未启用，可保持模板默认值或留空。
 
 ### 6. 应用参数
 
@@ -164,10 +175,52 @@ SMTP 配置存于数据库，通过管理控制台「邮件服务」页面维护
 |----|------|
 | `TokenExpiryMinutes` | 邮箱验证 Token 有效期（分钟），默认 20 |
 | `AdminPasswordLength` | 首次启动生成的初始账号口令长度，默认 12 |
-| `SelfBaseUrl` | 控制台回环调用本进程 REST API 的基地址。留空时按请求的 scheme + host 解析，可适配反向代理与 `AllowedHosts` 限制；无请求上下文时从 `ASPNETCORE_URLS`/`urls` 推导（通配地址替换为 `localhost`），最终回落 `http://localhost:5000`。仅需强制走特定内网地址时才配置 |
+| `SelfBaseUrl` | 控制台回环调用本进程 REST API 的基地址。**可选覆盖项，一般留空即可**：留空时自动使用进程真实监听地址（多地址优先 `http`；通配地址 `0.0.0.0` / `[::]` / `*` / `+` 规范化为 `localhost`）。仅当自动解析出的地址无法从本机访问时才需显式填写 |
 | `DataProtectionKeysPath` | Data Protection 密钥环目录，默认 `keys`，相对应用工作目录 |
 
-- `SelfBaseUrl` 的 Host 自动加入 `HostFiltering` 白名单，因此 `AllowedHosts` 仅登记对外域名时也能正常工作。
+- 回环调用地址取自**进程真实监听的地址**（与 `launchSettings` / `--urls` / `ASPNETCORE_URLS` / `HTTP_PORTS` / IIS-ANCM 动态端口无关，均能正确解析），因此**无需配置任何环境变量**即可在本地 `dotnet run` 与生产环境工作。
+- 解析不到任何 HTTP/HTTPS 监听地址时应用**启动即失败**并在控制台与 `logs/` 给出指引，不会回落到一个没人监听的地址。此时可按提示设置 `AppSettings:SelfBaseUrl`（或环境变量 `AppSettings__SelfBaseUrl`）为**本机可达**的地址。
+- 回环地址的 Host 会在启动后自动并入 `HostFiltering` 白名单，因此 `AllowedHosts` 仅登记对外域名（如 `api.yourdomain.com`）时也能正常工作。
+
+#### 权限缓存与会话安全
+
+权限缓存采用「全局版本号」策略：缓存键带版本前缀，权限写操作只把版本号自增一次，其他实例在 `VersionCacheSeconds` 内自然读到新版本并回源查库。因此修改权限（含批量改组内成员）后，所有实例在**秒级**返回新结果，且不再逐个用户清缓存。
+
+```json
+{
+  "Permissions": {
+    "CacheTtlMinutes": 2,
+    "VersionCacheSeconds": 1,
+    "ClientPollSeconds": 30
+  },
+  "Security": {
+    "SessionValidationCacheSeconds": 5,
+    "LoginHistoryRetentionDays": 180,
+    "LocationHistoryDays": 90,
+    "AlertOnNewDevice": true,
+    "AlertOnNewLocation": true,
+    "AlertDedupHours": 24,
+    "Ip2RegionDbPath": "App_Data/ip2region.xdb"
+  }
+}
+```
+
+| 键 | 说明 |
+|----|------|
+| `Permissions:CacheTtlMinutes` | 权限缓存兜底 TTL（分钟），默认 2；正常情况下由版本号失效，不依赖该值 |
+| `Permissions:VersionCacheSeconds` | 版本号内存缓存秒数，默认 1，等于跨实例生效延迟 |
+| `Permissions:ClientPollSeconds` | 管理控制台轮询权限版本的间隔（秒），默认 30；`<= 0` 关闭自动刷新 |
+| `Security:SessionValidationCacheSeconds` | 会话有效性校验结果缓存秒数，默认 5；只缓存「有效」结论，撤销后最长 5 秒生效 |
+| `Security:LoginHistoryRetentionDays` | 登录日志保留天数，默认 180，由清理任务定期删除 |
+| `Security:LocationHistoryDays` | 异地登录判定回溯天数，默认 90 |
+| `Security:AlertOnNewDevice` | 新设备登录时发送邮件提醒，默认开启 |
+| `Security:AlertOnNewLocation` | 异地登录时发送邮件提醒，默认开启 |
+| `Security:AlertDedupHours` | 同一设备+地点的提醒去重窗口（小时），默认 24 |
+| `Security:Ip2RegionDbPath` | 离线 IP 库路径，相对内容根目录；缺失时归属地显示为「未知」且不影响登录 |
+
+- IP 归属地使用离线库 `ip2region.xdb`（[ip2region](https://github.com/lionsoul2014/ip2region) 项目，取 `data/ip2region.xdb`）。把文件放到 `App_Data/ip2region.xdb` 即可，发布时会随输出复制；未放置时系统仍可正常运行，仅归属地解析降级为「未知」。
+- 登录风险提醒走有界内存队列异步发送，登录接口不等待邮件结果；SMTP 未配置或发送失败只记日志，不影响登录。
+- 登录审计只记录事件与网络环境（IP、归属地、设备名、UA），**不记录密码与令牌明文**。
 
 ### 7. 运行
 
@@ -178,17 +231,18 @@ dotnet run --environment Production
 
 首次运行前复制 `Properties/launchSettings.template.json` 为 `Properties/launchSettings.json`，替换 `YOUR_DB_USER`、`YOUR_DB_PASSWORD`。
 
-宿主启动完成后打印监听地址（通配地址规范化为 `localhost`）：
+宿主启动完成后打印监听地址（通配地址规范化为 `localhost`），横幅中的「回环基地址」即控制台访问自身 API 所用的地址，与实际监听地址同源：
 
 ```
   ──────────────────────────────────────────────
     管理控制台: http://localhost:5208/
     Swagger UI: http://localhost:5208/swagger
     Health:     http://localhost:5208/health
+    回环基地址: http://localhost:5208  （取自进程真实监听地址，可用 AppSettings:SelfBaseUrl 覆盖）
   ──────────────────────────────────────────────
 ```
 
-端口来自 `Properties/launchSettings.json` 的 `applicationUrl`（默认 5208）；使用 `--urls` 或 `ASPNETCORE_URLS` 时以实际值为准。
+端口以**进程实际监听地址**为准，来源可以是 `Properties/launchSettings.json` 的 `applicationUrl`（默认 5208）、`--urls`、`ASPNETCORE_URLS`、`HTTP_PORTS` 或 IIS/ANCM 动态端口；无法解析出任何监听地址时启动直接失败并给出指引。
 
 Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 
@@ -229,7 +283,7 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 | 无权限提示 | `/forbidden` | 登录即可 |
 | 我的权限 | `/my-permissions` | 登录即可 |
 
-详细使用说明见 [`docs/ADMIN_CONSOLE.md`](docs/ADMIN_CONSOLE.md)。
+页面即上表所列路径，登录后按自身权限自动显隐菜单与操作按钮；权限变更后约 30 秒内自动刷新，无需手动重新加载页面。
 
 ## 权限体系
 
@@ -251,8 +305,8 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 |--------|------|:---:|:---:|:---:|---------|
 | 初始用户 | 仅 uid=0 成员，持有 A | 是（不可增删成员） | 否 | 否 | `PERM_A` |
 | 超级管理员 | 除 A 外全部权限 | 否 | 否 | 否 | `PERM_B`、`PERM_C` + 全部 API 权限 |
-| 管理员 | 用户管理与基本管理权限 | 否 | 是 | 否 | 用户管理（含重置密码）+ 统计 + 头像 + 权限组查看 + 登出 + 关注 + 系统设置 |
-| 普通用户 | 基本用户权限 | 否 | 是 | 是 | 查看/更新自己 + 修改密码/邮箱 + 头像 + 登出 + 关注 |
+| 管理员 | 用户管理与基本管理权限 | 否 | 是 | 否 | 用户管理（含重置密码）+ 统计 + 头像 + 权限组查看 + 登出 + 系统设置 |
+| 普通用户 | 基本用户权限 | 否 | 是 | 是 | 查看/更新自己 + 修改密码/邮箱 + 头像 + 登出 |
 
 - 初始权限组：不可编辑（名称、描述、权限）、不可删除、不可增删成员。
 - 超级管理员组：不可删除，成员与权限可修改。
@@ -273,6 +327,9 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 | user | `user:change-email` | 修改邮箱 |
 | user | `user:logout` | 登出 |
 | user | `user:reset-password` | 管理员重置指定用户登录密码 |
+| security | `session:read` | 查看本人的登录设备列表 |
+| security | `session:revoke` | 踢出本人指定设备或全部其他设备 |
+| security | `login-history:read` | 查看本人的登录、刷新、登出与被踢记录 |
 | avatar | `avatar:upload` | 上传头像 |
 | avatar | `avatar:delete` | 删除头像 |
 | admin | `admin:stats` | 管理员统计（C 权限覆盖） |
@@ -287,9 +344,6 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 | user-group | `user-group:delete` | 删除权限组（B 权限覆盖） |
 | user-group | `user-group:manage-members` | 增删权限组成员（B 权限覆盖） |
 | user-group | `user-group:manage-permissions` | 设置权限组权限（B 权限覆盖） |
-| follow | `follow:user` | 关注/取关其他用户 |
-| follow | `follow:read` | 查看关注列表、粉丝列表与统计 |
-| follow | `follow:manage` | 管理关注列表隐私设置 |
 | system-setting | `system-setting:read` | 查看系统设置 |
 | system-setting | `system-setting:update` | 更新站点名称、LOGO、友链、登录/注册开关 |
 | smtp | `smtp:read` | 查看邮件配置（密码脱敏） |
@@ -302,7 +356,7 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 ### 权限检查逻辑
 
 1. 从 JWT 获取用户 ID。
-2. 查询用户所属全部权限组及权限（内存缓存，5 分钟过期）。
+2. 查询用户所属全部权限组及权限（内存缓存，键带全局权限版本前缀，版本变化即失效，兜底 TTL 2 分钟）。
 3. 检查顺序：
    - 拥有 A 权限 → 通过
    - API 属于 B 覆盖范围（权限管理 + 权限组管理）且拥有 B → 通过
@@ -356,7 +410,11 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 | POST | `/api/users/{id}/change-email` | 申请修改邮箱 | `user:change-email` | 否（仅限本人） |
 | POST | `/api/users/{id}/avatar` | 上传头像 | `avatar:upload` | 是 |
 | DELETE | `/api/users/{id}/avatar` | 删除头像 | `avatar:delete` | 是 |
-| POST | `/api/users/logout` | 用户登出 | `user:logout` | 否 |
+| POST | `/api/users/logout` | 用户登出（仅撤销当前设备会话） | `user:logout` | 否 |
+| GET | `/api/users/me/sessions` | 查看本人登录设备（含「当前设备」标记） | `session:read` | - |
+| DELETE | `/api/users/me/sessions/{sessionId}` | 踢出本人指定设备 | `session:revoke` | - |
+| DELETE | `/api/users/me/sessions` | 踢出本人除当前设备外的全部会话 | `session:revoke` | - |
+| GET | `/api/users/me/login-history` | 分页查询本人登录历史 | `login-history:read` | - |
 
 - `allowSelf`：路由参数 `{id}` 与当前用户 ID 匹配时跳过权限检查。change-password 与 change-email 不使用 allowSelf，而是要求权限并手动校验仅限本人。
 - 邮箱修改：普通用户不能通过 PUT/PATCH 直接修改邮箱，须走 change-email 流程（验证密码 → 发送验证邮件 → 确认修改）；管理员可直接通过 PUT 修改。
@@ -364,23 +422,13 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 - 头像上传：仅支持 JPG/PNG/GIF/WebP，最大 6MB。大于 512KB 时压缩并生成 256px 缩略图，否则缩略图等于原图。
 - `GET /api/users/me/permissions` 返回 `{ userId, codes: [...] }`，`codes` 为展开 A/B/C 覆盖后的有效权限码，供前端控制菜单与按钮显隐。
 
-### 关注端点（认证 + 权限）
+会话与登录历史：
 
-| 方法 | 路由 | 描述 | 所需权限 |
-|------|------|------|---------|
-| POST | `/api/users/{userId}/follow` | 关注用户 | `follow:user` |
-| DELETE | `/api/users/{userId}/follow` | 取消关注 | `follow:user` |
-| GET | `/api/users/{userId}/follow/status` | 检查是否已关注 | `follow:read` |
-| GET | `/api/users/me/following` | 我的关注列表 | `follow:read` |
-| GET | `/api/users/me/followers` | 我的粉丝列表 | `follow:read` |
-| GET | `/api/users/me/follow/stats` | 我的关注统计 | `follow:read` |
-| GET | `/api/users/{userId}/following` | 指定用户关注列表（受隐私设置影响） | `follow:read` |
-| GET | `/api/users/{userId}/followers` | 指定用户粉丝列表 | `follow:read` |
-| GET | `/api/users/{userId}/follow/stats` | 指定用户关注统计 | `follow:read` |
-| PUT | `/api/users/me/following/visibility` | 设置关注列表可见性 | `follow:manage` |
-| GET | `/api/users/me/following/visibility` | 获取关注列表可见性设置 | `follow:manage` |
-
-- 隐私设置：关注列表可设为仅自己可见；隐藏后他人查看返回空列表。列表接口支持 `page`（默认 1）与 `pageSize`（默认 20，最大 100）。
+- `GET /api/users/me/sessions` 返回 `{ items: [{ id, deviceName, deviceType, ip, location, userAgent, createdAt, lastActiveAt, isCurrent, isActive }], total }`；`isCurrent` 标记当前请求所在的设备会话。
+- `DELETE /api/users/me/sessions/{sessionId}` 只能撤销本人会话，撤销他人会话返回 404；撤销后该设备的 Access Token 在数秒内失效。
+- `DELETE /api/users/me/sessions` 保留当前设备、撤销其余全部会话，返回 `{ revoked: n }`。
+- `GET /api/users/me/login-history` 支持 `page`、`pageSize`（1-100，默认 20）、`success`（`true`/`false`）、`eventType`（`login` / `refresh` / `logout` / `revoked`），返回 `{ items, total, page, pageSize }`；提醒邮件的发送记录（`alert`）不对外返回。
+- 同一「浏览器 + 操作系统」组合视为同一设备：新登录会顶掉该设备上的旧会话（`replaced_by_new_device`），不同设备可同时在线。
 
 ### 管理员端点（认证 + 权限）
 
@@ -394,6 +442,8 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 | POST | `/api/admin/email/test` | 发送测试邮件（使用库中 SMTP 配置） | `admin:server` | C |
 | POST | `/api/admin/users` | 创建用户（不发送验证邮件；密码留空则生成） | `user:create` | - |
 | POST | `/api/admin/users/{id}/reset-password` | 重置指定用户密码（不传新密码则生成并一次性返回） | `user:reset-password` | - |
+| GET | `/api/admin/users/{id}/sessions` | 查看指定用户的登录设备 | `user:read` | - |
+| DELETE | `/api/admin/users/{id}/sessions/{sessionId}` | 踢出指定用户的某个设备 | `user:update` | - |
 
 - 统计接口支持 `days`（正整数）Query 参数。
 
@@ -552,21 +602,25 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 
 | 表名 | 说明 |
 |------|------|
-| `users` | 用户（含 JSON 扩展字段 `extras`、Refresh Token、关注列表隐私设置） |
+| `users` | 用户（含 JSON 扩展字段 `extras`） |
 | `email_verification_tokens` | 邮箱验证令牌 |
 | `permissions` | 权限（含 A/B/C 与各 API 权限；`creator_id` 创建人，`subsystem_id` 归属子系统） |
 | `user_groups` | 权限组（`level`、`is_protected`、`is_member_locked`、`is_default_for_new_users`） |
 | `user_group_members` | 权限组成员关联 |
 | `user_group_permissions` | 权限组权限关联 |
-| `user_follows` | 关注关系（`follower_id` + `following_id` 唯一约束） |
 | `system_settings` | 系统设置（键值对，支持 string/bool/json） |
 | `revoked_tokens` | JWT 黑名单（撤销的 jti，按过期时间清理） |
 | `rate_limit_entries` | 限流计数（原子 upsert 递增） |
-| `online_users` | 在线用户活跃记录（30 分钟无活动视为离线） |
+| `user_sessions` | 登录会话（每设备一条；`refresh_token_hash` 唯一、`device_key`、`last_jti`、`revoked_at`/`revoked_reason`） |
+| `login_logs` | 登录审计流水（登录/刷新/登出/被踢 + 结果、失败原因、IP、归属地、设备） |
+| `cache_versions` | 缓存版本号（`scope` 主键，权限与用户状态缓存键的版本前缀） |
 | `smtp_config` | 邮件服务配置（单行，主键固定为 1；密码加密存储） |
 | `subsystems` | 子系统凭证（`code`/`api_key` 唯一索引；`api_secret_hash` 仅存 SHA256） |
 
 - 表结构由 EF Core Migrations 管理（见 `Migrations/`），服务启动时自动应用迁移。
+- 在线用户数不再单独建表，改由 `user_sessions.last_active_at`（30 分钟内活跃）派生，支持一个账号多设备在线。
+
+> **升级提示（破坏性变更）**：本版本把 Refresh Token 从 `users` 表迁移到 `user_sessions` 并删除 `online_users` 表。升级后**所有已登录用户需重新登录一次**（旧 Refresh Token 无法继续刷新，旧 Access Token 到期后需重新登录），无需手工迁移数据。
 
 ## 项目结构
 
@@ -587,11 +641,12 @@ UCS/
 ├── Configuration/      # AppConfiguration, JwtConfig, SmtpConfig, AppSettings, DatabaseConnection
 ├── Data/               # ApplicationDbContext, DatabaseMigrator
 ├── DTOs/               # ApiResponse, ResultCodes, PermissionCodes, PermissionDTOs,
-│                       # UserDTOs, FollowDTOs, SystemSettingDTOs
+│                       # UserDTOs, SystemSettingDTOs, SessionDTOs, CacheScopes
 ├── Endpoints/          # 按业务域垂直切片
 │   ├── AuthEndpoints.cs / UserProfileEndpoints.cs / AdminEndpoints.cs
+│   ├── SessionEndpoints.cs（登录设备 / 登录历史）
 │   ├── AvatarEndpoints.cs / PermissionEndpoints.cs / UserGroupEndpoints.cs
-│   ├── FollowEndpoints.cs / SystemSettingEndpoints.cs
+│   ├── SystemSettingEndpoints.cs
 │   ├── SmtpConfigEndpoints.cs / SubsystemEndpoints.cs
 ├── Exceptions/         # BusinessException（服务层显式业务错误）
 ├── Extensions/         # UserExtensions, PermissionEndpointExtensions,
@@ -600,16 +655,21 @@ UCS/
 ├── Middleware/         # ExceptionHandlingMiddleware
 ├── Migrations/         # EF Core 迁移（启动时自动应用）
 ├── Models/             # 实体模型（User, EmailVerificationToken, Permission, UserGroup,
-│                       # UserGroupMember, UserGroupPermission, UserFollow, SystemSetting,
-│                       # RevokedToken, RateLimitEntry, OnlineUser, SmtpConfig, Subsystem）
-├── docs/               # INTEGRATION_GUIDE.md, ADMIN_CONSOLE.md
+│                       # UserGroupMember, UserGroupPermission, SystemSetting,
+│                       # RevokedToken, RateLimitEntry, SmtpConfig, Subsystem,
+│                       # UserSession, LoginLog, CacheVersion）
+├── App_Data/           # 离线 IP 库放置目录（ip2region.xdb，可选）
+├── docs/               # INTEGRATION_GUIDE.md（业务系统接入指南）
 ├── Services/           # 业务服务
-│   ├── ConsoleService.cs / EmailService.cs / FollowService.cs
-│   ├── InitializationService.cs / JwtService.cs / OnlineUserService.cs
-│   ├── PermissionService.cs / RateLimitService.cs / RefreshTokenService.cs
+│   ├── ConsoleService.cs / EmailService.cs
+│   ├── InitializationService.cs / JwtService.cs
+│   ├── PermissionService.cs / RateLimitService.cs / CacheVersionService.cs
+│   ├── SessionService.cs（会话与登录审计）
 │   ├── SystemMonitorService.cs / SystemSettingService.cs
 │   ├── TokenBlacklistService.cs / TokenCleanupService.cs / TokenService.cs
 │   ├── UserGroupService.cs / UserService.cs
+│   ├── Security/       # Ip2RegionLocationResolver, DeviceInfoFactory,
+│   │                   # LoginRiskEvaluator, LoginAlertQueue, LoginAlertBackgroundService
 │   └── Api/            # 管理前端 API 访问层
 │       ├── UcsApiClient.cs / SelfBaseUrlProvider.cs
 │       ├── ApiResult.cs / EndpointDataModels.cs
@@ -629,31 +689,59 @@ UCS/
 5. 邮箱验证/修改与注册均带频率限制（注册：同邮箱每分钟最多 5 次；邮件发送：同邮箱每分钟 1 次）。
 6. 封禁用户无法登录，也无法获取 JWT Token。
 7. 头像端点做路径遍历防护；上传校验文件魔数签名；大于 512KB 自动压缩并生成 256px 缩略图。
-8. JWT Token 支持黑名单撤销，登出与密码修改时撤销当前 Token 与 Refresh Token。
-9. 支持 Refresh Token（30 天有效），免密刷新 Access Token。
-10. 异常中间件在生产环境隐藏内部错误详情。
-11. A 权限仅限「初始用户」组，不可分配给其他权限组；特殊权限（A/B/C）不可通过 API 创建、修改或删除。
-12. 权限检查结果带内存缓存（5 分钟过期），修改权限后自动清除对应用户缓存。
-13. 自定义权限记录创建人（`creator_id`），系统内置权限创建人为 null。
-14. 系统初始用户（uid=0）不可删除、不可修改、不可从初始权限组移除；启动时检查其归属，若不在则自动修复。
-15. SMTP 连接默认加密（587=STARTTLS，465=SSL，其他端口默认 STARTTLS）。
-16. 子系统 Secret 仅存 SHA256 哈希，明文只在创建/重置时返回一次；停用或删除后凭证立即失效。
-17. 子系统凭证只能访问「仅需认证、无需用户权限」的端点（即权限检查接口）。
-18. SMTP 密码经 Data Protection 加密存储，接口返回值脱敏（仅返回 `hasPassword`）。
-19. 服务端日志不记录 SMTP 明文密码、子系统明文 Secret 与 JWT 明文令牌。
+8. JWT Token 支持黑名单撤销；同时校验 `sid` 指向的会话是否仍然有效，登出、踢出、封禁、改密后旧 Token 在数秒内失效。
+9. 登录会话按设备独立保存（Refresh Token 有效期默认 30 天），支持多设备同时在线；同一「浏览器 + 操作系统」只保留最近一次登录，新登录会顶掉旧会话。
+10. Refresh Token 每次刷新都轮换，旧值立即失效；检测到已用过的 Token 被再次提交时，判定为复用攻击并撤销整条会话。
+11. 异常中间件在生产环境隐藏内部错误详情。
+12. A 权限仅限「初始用户」组，不可分配给其他权限组；特殊权限（A/B/C）不可通过 API 创建、修改或删除。
+13. 权限缓存采用全局版本号 + 版本前缀键，权限写操作只自增一次版本号，所有实例在约 1 秒内返回新结果；不再逐用户清缓存，批量改组内成员也不会产生 O(N) 写放大。
+14. 自定义权限记录创建人（`creator_id`），系统内置权限创建人为 null。
+15. 系统初始用户（uid=0）不可删除、不可修改、不可从初始权限组移除；启动时检查其归属，若不在则自动修复。
+16. SMTP 连接默认加密（587=STARTTLS，465=SSL，其他端口默认 STARTTLS）。
+17. 子系统 Secret 仅存 SHA256 哈希，明文只在创建/重置时返回一次；停用或删除后凭证立即失效。
+18. 子系统凭证只能访问「仅需认证、无需用户权限」的端点（即权限检查接口）。
+19. SMTP 密码经 Data Protection 加密存储，接口返回值脱敏（仅返回 `hasPassword`）。
+20. 服务端日志不记录 SMTP 明文密码、子系统明文 Secret 与 JWT 明文令牌。
+21. 登录审计（`login_logs`）记录事件、结果、IP、归属地、设备名与 UA，不记录密码与令牌明文；按 `Security:LoginHistoryRetentionDays` 定期清理。
+22. 新设备或异地登录会异步发送邮件提醒（可在 `Security` 节关闭），登录接口不等待邮件发送结果。
+23. 离线 IP 库仅做本地查询，不外发 IP；库文件缺失时归属地降级为「未知」，异地判定退回网段比对。
 
 ## 生产环境部署清单
 
+> **环境变量只需一个：`UCS_DB_CONNECTION`。** 控制台的回环调用基地址自动取自进程真实监听地址，
+> 不需要任何 SelfBaseUrl 相关环境变量；`appsettings.json` 中只需按模板填写 JWT Key、`AllowedOrigins`
+> 等既有项。
+
+- 通过环境变量 `UCS_DB_CONNECTION` 提供数据库连接串（唯一必需的环境变量）。
 - 修改 JWT Key 为 64+ 字符的随机字符串。
-- 通过环境变量 `UCS_DB_CONNECTION` 提供数据库连接串。
-- 配置 `ApiBaseUrl` 为 HTTPS 地址。
 - 配置 `AllowedOrigins` 限制跨域来源。
+- 按需配置 `ApiBaseUrl`（仅用于验证邮件链接）为 HTTPS 地址。
+- `SelfBaseUrl` 保持留空（自动解析，见第 6 节）。
 - 配置反向代理（Nginx/Caddy）并启用 HTTPS。
+- 如需登录归属地展示，把 `ip2region.xdb` 放入 `App_Data/`（随发布复制）；放不到也只影响归属地，不影响登录。
 - 登录后立即修改管理员与初始用户口令。
 - 在控制台「邮件服务」页面完成 SMTP 配置并发送测试邮件。
 - 持久化 Data Protection 密钥环目录（`keys/`；容器化部署须挂载持久卷）。
 - 反向代理须允许 WebSocket（转发 `Upgrade`/`Connection` 头）或关闭响应缓冲以支持 SSE 回退——管理前端交互依赖 `/_blazor` 长连接。
 - 若代理不在本机，需在 `UseForwardedHeaders` 中登记代理地址（默认仅信任回环代理）。
+- `AllowedHosts` 只登记对外域名即可，回环地址会自动并入白名单。
+
+### 临时应急：回环地址解析异常
+
+若上线后发现控制台提示「无法连接接口服务」且日志显示解析出的回环地址在本机不可达（例如容器内
+`localhost` 不通、或监听地址被刻意收敛），可临时挂一个覆盖值恢复服务：
+
+```ini
+# systemd
+Environment="AppSettings__SelfBaseUrl=https://your-public-domain"
+
+# docker compose
+environment:
+  AppSettings__SelfBaseUrl: "https://your-public-domain"
+```
+
+该地址必须**从应用本机可访问**（通常就是对外域名）。修复或确认自动解析正常后应移除该变量。
+若进程完全解析不到任何 HTTP/HTTPS 监听地址，应用会直接启动失败并在日志中提示配置该项。
 
 ## 日志系统
 

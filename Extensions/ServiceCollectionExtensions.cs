@@ -5,7 +5,6 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.AspNetCore.HostFiltering;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.IdentityModel.Tokens;
@@ -13,7 +12,9 @@ using Microsoft.OpenApi.Models;
 using UserManagementSystem.Auth;
 using UserManagementSystem.Configuration;
 using UserManagementSystem.Data;
+using UserManagementSystem.DTOs;
 using UserManagementSystem.Logging;
+using UserManagementSystem.Services.Security;
 using UserManagementSystem.Models;
 using UserManagementSystem.Services;
 using UserManagementSystem.Services.Api;
@@ -33,6 +34,8 @@ public static class ServiceCollectionExtensions
         var appConfig = new AppConfiguration();
         builder.Configuration.GetSection("Jwt").Bind(appConfig.Jwt);
         builder.Configuration.GetSection("AppSettings").Bind(appConfig.AppSettings);
+        builder.Configuration.GetSection("Permissions").Bind(appConfig.Permissions);
+        builder.Configuration.GetSection("Security").Bind(appConfig.Security);
 
         if (string.IsNullOrWhiteSpace(appConfig.Jwt.Key) || appConfig.Jwt.Key.Length < 64)
             throw new InvalidOperationException("JWT Key must be at least 64 characters.");
@@ -42,7 +45,6 @@ public static class ServiceCollectionExtensions
 
         builder.Services.AddSingleton(appConfig);
         AddAppDataProtection(builder, appConfig);
-        AllowSelfCallHost(builder, appConfig);
         return appConfig;
     }
 
@@ -93,61 +95,20 @@ public static class ServiceCollectionExtensions
         // circuit 建立/关闭记录：用于区分"前端交互通道未建立"与"应用逻辑异常"
         services.AddScoped<CircuitHandler, LoggingCircuitHandler>();
 
-        // 回环调用基地址按当前请求解析（见 SelfBaseUrlProvider），需访问 HttpContext
-        services.AddHttpContextAccessor();
-        services.AddScoped<SelfBaseUrlProvider>();
+        // 回环调用基地址取自进程真实监听地址（见 SelfBaseUrlProvider）。
+        // 单例：地址在启动后即固定，进程内缓存一次即可，保证启动横幅、
+        // HostFiltering 白名单与回环调用三处使用的是同一个地址。
+        services.AddSingleton<SelfBaseUrlProvider>();
 
         // 前端运行于服务端，通过回环 HTTP 调用本进程 API：
         // 复用既有端点鉴权（RequirePermission），且无需 CORS。
-        // 不设置 BaseAddress —— 绝对地址由 SelfBaseUrlProvider 按请求解析。
+        // 不设置 BaseAddress —— 绝对地址由 SelfBaseUrlProvider 解析（取自真实监听地址）。
         services.AddHttpClient<UcsApiClient>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(30);
         });
     }
 
-    /// <summary>
-    /// 允许管理前端的回环自调用地址通过 Host 过滤。
-    /// <para>
-    /// 生产环境的 AllowedHosts 通常只登记对外域名（如 api.example.com），而管理前端会以本机地址
-    /// 回环调用自身 API。该 Host 若未登记，将被 HostFiltering 直接以 400 Invalid Hostname 拒绝，
-    /// 导致界面所有数据请求失败（表现为登录按钮无反应或"响应解析失败"）。
-    /// </para>
-    /// </summary>
-    private static void AllowSelfCallHost(WebApplicationBuilder builder, AppConfiguration appConfig)
-    {
-        var selfBase = string.IsNullOrWhiteSpace(appConfig.AppSettings.SelfBaseUrl)
-            ? SelfBaseUrlProvider.DeriveFromListenUrls(builder.Configuration)
-            : appConfig.AppSettings.SelfBaseUrl;
-
-        if (!Uri.TryCreate(SelfBaseUrlProvider.Normalize(selfBase), UriKind.Absolute, out var uri))
-        {
-            return;
-        }
-
-        builder.Services.PostConfigure<HostFilteringOptions>(options =>
-        {
-            var allowed = options.AllowedHosts;
-            if (allowed is null || allowed.Count == 0 || allowed.Any(host => host == "*"))
-            {
-                return;
-            }
-
-            // 注意：框架从配置读取 AllowedHosts 时使用 Split(';')，得到的是定长集合，
-            // 因此必须重新赋值而不能就地 Add。
-            var merged = new List<string>(allowed);
-            foreach (var candidate in new[] { uri.Authority, uri.Host })
-            {
-                if (!string.IsNullOrWhiteSpace(candidate) &&
-                    !merged.Contains(candidate, StringComparer.OrdinalIgnoreCase))
-                {
-                    merged.Add(candidate);
-                }
-            }
-
-            options.AllowedHosts = merged;
-        });
-    }
 
     /// <summary>
     /// 注册数据库上下文（MySQL，固定 ServerVersion + 失败重试）。
@@ -181,24 +142,28 @@ public static class ServiceCollectionExtensions
     {
         services.AddMemoryCache();
 
-        services.AddScoped<IOnlineUserService, OnlineUserService>();
         services.AddScoped<IUserService, UserService>();
         services.AddScoped<ITokenService, TokenService>();
         services.AddScoped<IEmailService, EmailService>();
         services.AddSingleton<IJwtService, JwtService>();
         services.AddScoped<ITokenBlacklistService, TokenBlacklistService>();
         services.AddScoped<IRateLimitService, RateLimitService>();
-        services.AddScoped<IRefreshTokenService, RefreshTokenService>();
+        services.AddScoped<ISessionService, SessionService>();
+        services.AddScoped<ICacheVersionService, CacheVersionService>();
         services.AddScoped<IPermissionService, PermissionService>();
         services.AddScoped<IUserGroupService, UserGroupService>();
+        services.AddSingleton<IIpLocationResolver, Ip2RegionLocationResolver>();
+        services.AddScoped<ILoginRiskEvaluator, LoginRiskEvaluator>();
+        services.AddSingleton<ILoginAlertQueue, LoginAlertQueue>();
         services.AddSingleton<ISystemMonitorService, SystemMonitorService>();
-        services.AddScoped<IFollowService, FollowService>();
         services.AddScoped<ISystemSettingService, SystemSettingService>();
         services.AddScoped<ISmtpConfigService, SmtpConfigService>();
         services.AddScoped<ISubsystemService, SubsystemService>();
 
         services.AddHostedService<InitializationService>();
         services.AddHostedService<TokenCleanupService>();
+        // 登录风险提醒的异步发送（与登录主流程解耦）
+        services.AddHostedService<LoginAlertBackgroundService>();
         // 服务器指标定时采集（60s 落库，保留 8 天）；置于初始化服务之后，启动时迁移已完成
         services.AddHostedService<MetricsCollectorService>();
     }
@@ -245,13 +210,35 @@ public static class ServiceCollectionExtensions
                         }
                     }
 
+                    // 会话校验：JWT 中的 sid 指向 user_sessions。
+                    // 撤销会话（踢下线、被新设备顶替、封禁）后，最迟 SessionValidationCacheSeconds
+                    // 内所有实例都会拒绝该 token。旧版本令牌（无 sid）放行，兼容 ≤ExpiryMinutes 的过渡窗口。
+                    var sessionId = context.Principal?.FindFirst(JwtClaimNames.SessionId)?.Value;
+                    if (!string.IsNullOrEmpty(sessionId))
+                    {
+                        var sessionService = context.HttpContext.RequestServices.GetRequiredService<ISessionService>();
+                        if (!await sessionService.IsSessionActiveAsync(sessionId))
+                        {
+                            context.Fail("Session has been revoked");
+                            return;
+                        }
+
+                        // 活跃时间节流上报（同会话 1 分钟内只写一次），供「已登录客户端」排序与在线统计
+                        await sessionService.TouchAsync(
+                            sessionId,
+                            context.HttpContext.Connection.RemoteIpAddress?.ToString());
+                    }
+
                     var userIdClaim = context.Principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
                     if (userIdClaim != null && ulong.TryParse(userIdClaim, out var userId))
                     {
                         // 用户状态缓存 30s，避免每个请求都查询 users 表；
-                        // 状态变更时由 UserService 主动清除对应缓存
+                        // 键内嵌 user_status 版本号：状态变更（封禁/解封/删除）时版本号递增，
+                        // 所有实例的旧键立即失效，不再有 30 秒的滞后窗口。
                         var cache = context.HttpContext.RequestServices.GetRequiredService<IMemoryCache>();
-                        var cacheKey = UserService.UserStatusCacheKey(userId);
+                        var versionService = context.HttpContext.RequestServices.GetRequiredService<ICacheVersionService>();
+                        var statusVersion = await versionService.GetVersionAsync(CacheScopes.UserStatus);
+                        var cacheKey = UserService.UserStatusCacheKey(statusVersion, userId);
                         if (!cache.TryGetValue(cacheKey, out UserStatus status))
                         {
                             var userService = context.HttpContext.RequestServices.GetRequiredService<IUserService>();

@@ -22,6 +22,26 @@ namespace UserManagementSystem.Migrations
 
             MySqlModelBuilderExtensions.AutoIncrementColumns(modelBuilder);
 
+            modelBuilder.Entity("UserManagementSystem.Models.CacheVersion", b =>
+                {
+                    b.Property<string>("Scope")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)")
+                        .HasColumnName("scope");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("Scope");
+
+                    b.ToTable("cache_versions");
+                });
+
             modelBuilder.Entity("UserManagementSystem.Models.EmailVerificationToken", b =>
                 {
                     b.Property<ulong>("Id")
@@ -73,22 +93,77 @@ namespace UserManagementSystem.Migrations
                     b.ToTable("email_verification_tokens");
                 });
 
-            modelBuilder.Entity("UserManagementSystem.Models.OnlineUser", b =>
+            modelBuilder.Entity("UserManagementSystem.Models.LoginLog", b =>
                 {
-                    b.Property<string>("UserId")
+                    b.Property<ulong>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint unsigned")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<ulong>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DeviceName")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("device_name");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)")
+                        .HasColumnName("event_type");
+
+                    b.Property<string>("FailReason")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("fail_reason");
+
+                    b.Property<string>("Ip")
+                        .HasMaxLength(45)
+                        .HasColumnType("varchar(45)")
+                        .HasColumnName("ip");
+
+                    b.Property<string>("Location")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("location");
+
+                    b.Property<string>("LoginIdentifier")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("login_identifier");
+
+                    b.Property<string>("SessionId")
                         .HasMaxLength(64)
                         .HasColumnType("varchar(64)")
+                        .HasColumnName("session_id");
+
+                    b.Property<bool>("Success")
+                        .HasColumnType("tinyint(1)")
+                        .HasColumnName("success");
+
+                    b.Property<string>("UserAgent")
+                        .HasMaxLength(512)
+                        .HasColumnType("varchar(512)")
+                        .HasColumnName("user_agent");
+
+                    b.Property<ulong?>("UserId")
+                        .HasColumnType("bigint unsigned")
                         .HasColumnName("user_id");
 
-                    b.Property<DateTime>("LastActiveAt")
-                        .HasColumnType("datetime(6)")
-                        .HasColumnName("last_active_at");
+                    b.HasKey("Id");
 
-                    b.HasKey("UserId");
+                    b.HasIndex("CreatedAt");
 
-                    b.HasIndex("LastActiveAt");
+                    b.HasIndex("Ip");
 
-                    b.ToTable("online_users");
+                    b.HasIndex("UserId", "CreatedAt");
+
+                    b.ToTable("login_logs");
                 });
 
             modelBuilder.Entity("UserManagementSystem.Models.Permission", b =>
@@ -458,12 +533,6 @@ namespace UserManagementSystem.Migrations
                         .HasColumnType("json")
                         .HasColumnName("extras");
 
-                    b.Property<bool>("IsFollowingListHidden")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("tinyint(1)")
-                        .HasDefaultValue(false)
-                        .HasColumnName("is_following_list_hidden");
-
                     b.Property<DateTime?>("LastLoginAt")
                         .HasColumnType("datetime(6)")
                         .HasColumnName("last_login_at");
@@ -483,15 +552,6 @@ namespace UserManagementSystem.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("varchar(20)")
                         .HasColumnName("phone");
-
-                    b.Property<string>("RefreshToken")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)")
-                        .HasColumnName("refresh_token");
-
-                    b.Property<DateTime?>("RefreshTokenExpiresAt")
-                        .HasColumnType("datetime(6)")
-                        .HasColumnName("refresh_token_expires_at");
 
                     b.Property<int>("Status")
                         .ValueGeneratedOnAdd()
@@ -523,44 +583,6 @@ namespace UserManagementSystem.Migrations
                         .IsUnique();
 
                     b.ToTable("users");
-                });
-
-            modelBuilder.Entity("UserManagementSystem.Models.UserFollow", b =>
-                {
-                    b.Property<ulong>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint unsigned")
-                        .HasColumnName("id");
-
-                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<ulong>("Id"));
-
-                    b.Property<DateTime>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetime")
-                        .HasColumnName("created_at");
-
-                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<DateTime>("CreatedAt"));
-
-                    b.Property<ulong>("FollowerId")
-                        .HasColumnType("bigint unsigned")
-                        .HasColumnName("follower_id");
-
-                    b.Property<ulong>("FollowingId")
-                        .HasColumnType("bigint unsigned")
-                        .HasColumnName("following_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CreatedAt");
-
-                    b.HasIndex("FollowerId");
-
-                    b.HasIndex("FollowingId");
-
-                    b.HasIndex("FollowerId", "FollowingId")
-                        .IsUnique();
-
-                    b.ToTable("user_follows");
                 });
 
             modelBuilder.Entity("UserManagementSystem.Models.UserGroup", b =>
@@ -681,6 +703,108 @@ namespace UserManagementSystem.Migrations
                     b.ToTable("user_group_permissions");
                 });
 
+            modelBuilder.Entity("UserManagementSystem.Models.UserSession", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DeviceKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)")
+                        .HasColumnName("device_key");
+
+                    b.Property<string>("DeviceName")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("device_name");
+
+                    b.Property<string>("DeviceType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)")
+                        .HasColumnName("device_type");
+
+                    b.Property<string>("Ip")
+                        .HasMaxLength(45)
+                        .HasColumnType("varchar(45)")
+                        .HasColumnName("ip");
+
+                    b.Property<DateTime>("LastActiveAt")
+                        .HasColumnType("datetime")
+                        .HasColumnName("last_active_at");
+
+                    b.Property<string>("LastIp")
+                        .HasMaxLength(45)
+                        .HasColumnType("varchar(45)")
+                        .HasColumnName("last_ip");
+
+                    b.Property<string>("LastJti")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)")
+                        .HasColumnName("last_jti");
+
+                    b.Property<string>("Location")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("location");
+
+                    b.Property<string>("PreviousRefreshTokenHash")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("previous_refresh_token_hash");
+
+                    b.Property<DateTime>("RefreshTokenExpiresAt")
+                        .HasColumnType("datetime")
+                        .HasColumnName("refresh_token_expires_at");
+
+                    b.Property<string>("RefreshTokenHash")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("refresh_token_hash");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("datetime")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<string>("RevokedReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)")
+                        .HasColumnName("revoked_reason");
+
+                    b.Property<string>("UserAgent")
+                        .HasMaxLength(512)
+                        .HasColumnType("varchar(512)")
+                        .HasColumnName("user_agent");
+
+                    b.Property<ulong>("UserId")
+                        .HasColumnType("bigint unsigned")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LastActiveAt");
+
+                    b.HasIndex("PreviousRefreshTokenHash");
+
+                    b.HasIndex("RefreshTokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("UserId", "DeviceKey");
+
+                    b.ToTable("user_sessions");
+                });
+
             modelBuilder.Entity("UserManagementSystem.Models.EmailVerificationToken", b =>
                 {
                     b.HasOne("UserManagementSystem.Models.User", "User")
@@ -707,25 +831,6 @@ namespace UserManagementSystem.Migrations
                     b.Navigation("Creator");
 
                     b.Navigation("Subsystem");
-                });
-
-            modelBuilder.Entity("UserManagementSystem.Models.UserFollow", b =>
-                {
-                    b.HasOne("UserManagementSystem.Models.User", "Follower")
-                        .WithMany("Following")
-                        .HasForeignKey("FollowerId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("UserManagementSystem.Models.User", "Following")
-                        .WithMany("Followers")
-                        .HasForeignKey("FollowingId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Follower");
-
-                    b.Navigation("Following");
                 });
 
             modelBuilder.Entity("UserManagementSystem.Models.UserGroupMember", b =>
@@ -766,6 +871,15 @@ namespace UserManagementSystem.Migrations
                     b.Navigation("Permission");
                 });
 
+            modelBuilder.Entity("UserManagementSystem.Models.UserSession", b =>
+                {
+                    b.HasOne("UserManagementSystem.Models.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("UserManagementSystem.Models.Subsystem", b =>
                 {
                     b.Navigation("Permissions");
@@ -773,10 +887,6 @@ namespace UserManagementSystem.Migrations
 
             modelBuilder.Entity("UserManagementSystem.Models.User", b =>
                 {
-                    b.Navigation("Followers");
-
-                    b.Navigation("Following");
-
                     b.Navigation("VerificationTokens");
                 });
 

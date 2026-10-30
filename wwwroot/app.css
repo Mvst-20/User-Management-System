@@ -1268,9 +1268,7 @@ a {
 }
 
 .ucs-login-brand {
-    padding-bottom: 14px;
     margin-bottom: 20px;
-    border-bottom: 1px solid var(--ucs-line);
 }
 
 .ucs-login-brand h1 {
@@ -1838,21 +1836,83 @@ a {
 
 /* ---- 下拉 / 菜单 ---- */
 .ant-dropdown-menu {
+    min-width: 140px;
     border-radius: 0;
     box-shadow: none;
     border: 1px solid var(--ucs-line);
     padding: 4px 0;
 }
 
-.ant-dropdown-menu-item {
+.ant-dropdown-menu-item,
+.ant-dropdown .ant-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     border-radius: 0;
     font-size: 13px;
     color: var(--ucs-ink-2);
+    white-space: nowrap;
 }
 
-.ant-dropdown-menu-item:hover {
+/* 菜单项内的 SVG 图标默认 display:block，需要让图标与文本保持同一行 */
+.ant-dropdown-menu-item .ant-menu-title-content,
+.ant-dropdown-menu-item .ant-dropdown-menu-title-content,
+.ant-dropdown .ant-menu-item .ant-menu-title-content,
+.ant-dropdown .ant-menu-item .ant-dropdown-menu-title-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.ant-dropdown-menu-item .ucs-icon,
+.ant-dropdown .ant-menu-item .ucs-icon {
+    flex: 0 0 auto;
+}
+
+.ant-dropdown-menu-item:hover,
+.ant-dropdown .ant-menu-item:hover {
     color: var(--ucs-ink);
     background: var(--ucs-bg-hover);
+}
+
+.ant-dropdown-menu-item-disabled,
+.ant-dropdown .ant-menu-item-disabled {
+    color: var(--ucs-ink-3);
+    cursor: not-allowed;
+}
+
+.ant-dropdown-menu-item-disabled:hover,
+.ant-dropdown .ant-menu-item-disabled:hover {
+    color: var(--ucs-ink-3);
+    background: transparent;
+}
+
+/* 表格行操作：仅保留一个三点按钮 */
+.ucs-row-actions-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    color: var(--ucs-ink-2);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    cursor: pointer;
+    transition: color var(--ucs-dur), background var(--ucs-dur);
+}
+
+.ucs-row-actions-trigger:hover {
+    color: var(--ucs-ink);
+    background: var(--ucs-bg-hover);
+}
+
+.ucs-row-actions-trigger:focus-visible {
+    outline: 2px solid var(--ucs-ink);
+    outline-offset: 1px;
 }
 
 .ant-menu-item-selected,

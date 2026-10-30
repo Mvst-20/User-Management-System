@@ -230,8 +230,7 @@ public static class AdminEndpoints
             ulong id,
             [FromBody] ResetPasswordRequest request,
             [FromServices] IUserService userService,
-            [FromServices] IOnlineUserService onlineUserService,
-            [FromServices] IRefreshTokenService refreshTokenService,
+            [FromServices] ISessionService sessionService,
             [FromServices] IUserGroupService userGroupService,
             [FromServices] AppConfiguration appConfig,
             [FromServices] ILogger<Program> logger,
@@ -271,9 +270,8 @@ public static class AdminEndpoints
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword, 12);
             await userService.UpdateUserAsync(user);
 
-            // 强制目标用户重新登录：撤销刷新令牌并标记离线
-            await refreshTokenService.RevokeAsync(id);
-            await onlineUserService.MarkUserOfflineAsync(id.ToString());
+            // 强制目标用户重新登录：撤销其全部会话（所有设备）
+            await sessionService.RevokeAllAsync(id, SessionRevokeReasons.PasswordReset);
 
             // 安全：不记录明文密码，仅记录操作
             logger.LogWarning("[RESET-PASSWORD] Password reset for user {UserId} by an administrator", id);

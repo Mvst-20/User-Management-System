@@ -67,33 +67,10 @@ public class User
     public string? Extras { get; set; }
 
     /// <summary>
-    /// Refresh Token 哈希值，用于长期保持登录状态
-    /// </summary>
-    [MaxLength(128)]
-    [Column("refresh_token")]
-    public string? RefreshToken { get; set; }
-
-    /// <summary>
-    /// Refresh Token 过期时间
-    /// </summary>
-    [Column("refresh_token_expires_at")]
-    public DateTime? RefreshTokenExpiresAt { get; set; }
-
-    /// <summary>
-    /// 是否隐藏关注列表（true=仅自己可见）
-    /// </summary>
-    [Column("is_following_list_hidden")]
-    public bool IsFollowingListHidden { get; set; } = false;
-
-    /// <summary>
     /// 注销（软删除）时间；用于统计"注销用户"逐日趋势。恢复为非删除状态时清空。
     /// </summary>
     [Column("deleted_at")]
     public DateTime? DeletedAt { get; set; }
 
     public virtual ICollection<EmailVerificationToken> VerificationTokens { get; set; } = new List<EmailVerificationToken>();
-
-    // 关注关系导航属性
-    public virtual ICollection<UserFollow> Following { get; set; } = new List<UserFollow>();
-    public virtual ICollection<UserFollow> Followers { get; set; } = new List<UserFollow>();
 }

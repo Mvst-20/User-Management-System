@@ -143,6 +143,10 @@ public sealed class UcsApiClient
     public Task<ApiResult<MyPermissionsResponse>> GetEffectivePermissionsAsync(CancellationToken ct = default)
         => GetAsync<MyPermissionsResponse>("/api/users/me/permissions", ct);
 
+    /// <summary>轻量轮询：仅取全局权限版本号，用于判断本地权限快照是否过期。</summary>
+    public Task<ApiResult<PermissionVersionResponse>> GetPermissionVersionAsync(CancellationToken ct = default)
+        => GetAsync<PermissionVersionResponse>("/api/users/me/permissions/version", ct);
+
     // ==================== HTTP 动词 ====================
 
     public Task<ApiResult<T>> GetAsync<T>(string url, CancellationToken ct = default)

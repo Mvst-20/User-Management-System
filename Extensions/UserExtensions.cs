@@ -34,8 +34,7 @@ public static class UserExtensions
             user.LastLoginAt,
             user.CreatedAt,
             user.EmailVerifiedAt,
-            extras,
-            user.IsFollowingListHidden
+            extras
         );
     }
 

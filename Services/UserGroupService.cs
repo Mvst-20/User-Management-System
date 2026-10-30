@@ -77,6 +77,9 @@ public class UserGroupService : IUserGroupService
 
         _context.UserGroups.Remove(group);
         await _context.SaveChangesAsync();
+
+        // 组成员关系随级联删除一并消失，其权限集合随之变化
+        await _permissionService.InvalidateAllPermissionCacheAsync();
         return true;
     }
 
@@ -300,16 +303,9 @@ public class UserGroupService : IUserGroupService
 
         await _context.SaveChangesAsync();
 
-        // 清除该组所有成员的权限缓存
-        var memberIds = await _context.UserGroupMembers
-            .Where(m => m.GroupId == groupId)
-            .Select(m => m.UserId)
-            .ToListAsync();
-
-        foreach (var memberId in memberIds)
-        {
-            await _permissionService.InvalidateUserPermissionCacheAsync(memberId);
-        }
+        // 版本号全局失效：原实现需查出组内全部成员再逐个清缓存，
+        // 大组场景是一次明显的写放大，且无法覆盖多实例部署下的其他实例。
+        await _permissionService.InvalidateAllPermissionCacheAsync();
 
         return true;
     }

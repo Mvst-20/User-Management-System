@@ -1,9 +1,12 @@
 using System.Globalization;
+using Microsoft.AspNetCore.HostFiltering;
+using Microsoft.Extensions.Options;
 using Serilog;
 using UserManagementSystem.Configuration;
 using UserManagementSystem.Data;
 using UserManagementSystem.Extensions;
 using UserManagementSystem.Logging;
+using UserManagementSystem.Services.Api;
 
 // 兜底：任何在下方 try/catch 之外导致进程终止的异常，也要留下可见的诊断信息
 AppDomain.CurrentDomain.UnhandledException += (_, args) =>
@@ -71,19 +74,32 @@ try
     app.UseAppPipeline();
     app.MapAppEndpoints();
 
-    // 监听地址在宿主启动完成后才最终确定（来源可能是 launchSettings 的 applicationUrl、--urls
-    // 或 ASPNETCORE_URLS）。此处不能在 app.Run() 之前打印——那时 app.Urls 往往为空，
-    // 会回落到默认值并与真实端口不一致，导致照着日志访问却打不开页面。
+    // 监听地址在宿主启动完成后才最终确定（来源可能是 launchSettings 的 applicationUrl、--urls、
+    // ASPNETCORE_URLS、HTTP_PORTS 或 IIS-ANCM 动态端口）。此处不能在 app.Run() 之前解析——那时
+    // IServer 尚未监听，取不到任何地址，会回落到一个假地址并与真实端口不一致，导致照着日志访问
+    // 却打不开页面，甚至让控制台的回环调用静默打到不存在的服务上。
     app.Lifetime.ApplicationStarted.Register(() =>
     {
-        var address = app.Urls.Count > 0
-            ? UserManagementSystem.Services.Api.SelfBaseUrlProvider.Normalize(app.Urls.First()) + "/"
-            : "http://localhost:5000/";
+        var selfBaseUrl = app.Services.GetRequiredService<SelfBaseUrlProvider>();
+
+        // 解析失败（进程未报告任何 HTTP/HTTPS 监听地址）直接启动失败：
+        // 由外层 catch + StartupFailureReporter 输出可读指引，绝不静默回落假地址。
+        var baseUrl = selfBaseUrl.GetBaseUrl();
+
+        // 回环调用的 Host 必须通过 HostFiltering。该合并只能在服务器启动后做（真实监听地址此刻才可见）：
+        // 生产环境 AllowedHosts 通常只登记对外域名，若不并入回环地址，界面所有数据请求都会被 400 拒绝。
+        // 必须取 IOptionsMonitor（而非 IOptions）：前者才是 HostFilteringMiddleware 持有的实例，
+        // 两者各自缓存不同对象，改错对象不会生效（详见 SelfBaseUrlProvider.EnsureHostAllowed）。
+        selfBaseUrl.EnsureHostAllowed(
+            app.Services.GetRequiredService<IOptionsMonitor<HostFilteringOptions>>().CurrentValue);
+
+        var address = baseUrl + "/";
 
         Log.Information("  ──────────────────────────────────────────────");
         Log.Information("  管理控制台: {Url}", address);
         Log.Information("  Swagger UI: {Url}swagger", address);
         Log.Information("  Health:     {Url}health", address);
+        Log.Information("  回环基地址: {Url}  （取自进程真实监听地址，可用 AppSettings:SelfBaseUrl 覆盖）", baseUrl);
         Log.Information("  ──────────────────────────────────────────────");
     });
 

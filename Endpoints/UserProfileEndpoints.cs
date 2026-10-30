@@ -77,9 +77,19 @@ public static class UserProfileEndpoints
 
             var codes = await permissionService.GetEffectivePermissionCodesAsync(userId.Value);
             var level = await userGroupService.GetUserPrivilegeLevelAsync(userId.Value);
+            var version = await permissionService.GetPermissionVersionAsync();
 
             return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功",
-                new MyPermissionsResponse(userId.Value, codes, level)));
+                new MyPermissionsResponse(userId.Value, codes, level, version)));
+        }).RequireAuthorization();
+
+        // 当前全局权限版本号：前端轮询此值，变化后才重新拉取权限集合（仅需认证）
+        app.MapGet("/api/users/me/permissions/version", async (
+            [FromServices] IPermissionService permissionService) =>
+        {
+            var version = await permissionService.GetPermissionVersionAsync();
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功",
+                new PermissionVersionResponse(version)));
         }).RequireAuthorization();
 
         // 获取单个用户信息（允许查看自己，查看他人需要 user:read 权限）
@@ -182,6 +192,7 @@ public static class UserProfileEndpoints
             ulong id,
             [FromBody] UpdateUserRequest request,
             [FromServices] IUserService userService,
+            [FromServices] ISessionService sessionService,
             [FromServices] IUserGroupService userGroupService,
             HttpContext httpContext) =>
         {
@@ -248,11 +259,6 @@ public static class UserProfileEndpoints
                 user.Extras = request.Extras.Value.GetRawText();
             }
 
-            if (request.IsFollowingListHidden.HasValue)
-            {
-                user.IsFollowingListHidden = request.IsFollowingListHidden.Value;
-            }
-
             if (statusChange.HasValue)
             {
                 var newStatus = (UserStatus)statusChange.Value;
@@ -271,6 +277,9 @@ public static class UserProfileEndpoints
 
             await userService.UpdateUserAsync(user);
 
+            // 封禁/注销时立刻踢掉所有设备上的会话，避免已登录用户继续访问
+            await RevokeSessionsForStatusAsync(sessionService, id, statusChange);
+
             return Results.Ok(new ApiResponse(ResultCodes.UpdateUserSuccess, "更新成功", user.ToResponse()));
         }).RequireAuthorization().RequirePermission(PermissionCodes.UserUpdate, allowSelf: true);
 
@@ -279,6 +288,7 @@ public static class UserProfileEndpoints
             ulong id,
             [FromBody] PatchUserRequest request,
             [FromServices] IUserService userService,
+            [FromServices] ISessionService sessionService,
             [FromServices] IUserGroupService userGroupService,
             HttpContext httpContext) =>
         {
@@ -329,11 +339,6 @@ public static class UserProfileEndpoints
                 user.Extras = request.Extras.Value.GetRawText();
             }
 
-            if (request.IsFollowingListHidden.HasValue)
-            {
-                user.IsFollowingListHidden = request.IsFollowingListHidden.Value;
-            }
-
             if (statusChange.HasValue)
             {
                 var newStatus = (UserStatus)statusChange.Value;
@@ -352,6 +357,9 @@ public static class UserProfileEndpoints
 
             await userService.UpdateUserAsync(user);
 
+            // 封禁/注销时立刻踢掉所有设备上的会话
+            await RevokeSessionsForStatusAsync(sessionService, id, statusChange);
+
             return Results.Ok(new ApiResponse(ResultCodes.UpdateUserSuccess, "更新成功", user.ToResponse()));
         }).RequireAuthorization().RequirePermission(PermissionCodes.UserUpdate, allowSelf: true);
 
@@ -359,7 +367,7 @@ public static class UserProfileEndpoints
         app.MapDelete("/api/users/{id}", async (
             ulong id,
             [FromServices] IUserService userService,
-            [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] ISessionService sessionService,
             [FromServices] IUserGroupService userGroupService,
             HttpContext httpContext) =>
         {
@@ -387,7 +395,8 @@ public static class UserProfileEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.DeleteUserFail_NotFound, "用户不存在"));
             }
 
-            await onlineUserService.MarkUserOfflineAsync(id.ToString());
+            // 用户被软删除后其会话必须立即失效
+            await sessionService.RevokeAllAsync(id, SessionRevokeReasons.UserDeleted);
 
             return Results.Ok(new ApiResponse(ResultCodes.DeleteUserSuccess, "用户已删除"));
         }).RequireAuthorization().RequirePermission(PermissionCodes.UserDelete);
@@ -428,9 +437,8 @@ public static class UserProfileEndpoints
             ulong id,
             [FromBody] ChangePasswordRequest request,
             [FromServices] IUserService userService,
-            [FromServices] IOnlineUserService onlineUserService,
+            [FromServices] ISessionService sessionService,
             [FromServices] ITokenBlacklistService tokenBlacklistService,
-            [FromServices] IRefreshTokenService refreshTokenService,
             [FromServices] AppConfiguration appConfig,
             HttpContext httpContext) =>
         {
@@ -460,9 +468,8 @@ public static class UserProfileEndpoints
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword, 12);
             await userService.UpdateUserAsync(user);
 
-            // 标记用户离线，撤销 Refresh Token
-            await onlineUserService.MarkUserOfflineAsync(id.ToString());
-            await refreshTokenService.RevokeAsync(id);
+            // 改密后所有设备都必须重新登录（含当前设备）
+            await sessionService.RevokeAllAsync(id, SessionRevokeReasons.PasswordChanged);
 
             // 撤销当前 Access Token，强制重新登录
             var jti = httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
@@ -528,5 +535,27 @@ public static class UserProfileEndpoints
 
             return Results.Ok(new ApiResponse(ResultCodes.ChangeEmailRequestSuccess, "验证邮件已发送到新邮箱，请查收"));
         }).RequireAuthorization().RequirePermission(PermissionCodes.UserChangeEmail);
+
+        // 状态变更为「封禁 / 注销」时撤销该用户全部会话：
+        // 会话撤销写入 last_jti 黑名单，所有实例立即生效，避免旧 token 在有效期内继续访问。
+        static async Task RevokeSessionsForStatusAsync(ISessionService sessionService, ulong userId, int? statusChange)
+        {
+            if (!statusChange.HasValue)
+            {
+                return;
+            }
+
+            var reason = (UserStatus)statusChange.Value switch
+            {
+                UserStatus.Banned => SessionRevokeReasons.Banned,
+                UserStatus.Deleted => SessionRevokeReasons.UserDeleted,
+                _ => null
+            };
+
+            if (reason != null)
+            {
+                await sessionService.RevokeAllAsync(userId, reason);
+            }
+        }
     }
 }

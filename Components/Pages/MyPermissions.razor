@@ -82,7 +82,7 @@
                 _userId = data.UserId;
                 _level = data.Level;
                 _codes = data.Codes?.OrderBy(code => code, StringComparer.Ordinal).ToList() ?? new List<string>();
-                Permissions.Set(_codes, data.Level);
+                Permissions.Set(_codes, data.Level, data.Version);
             }
             else
             {
