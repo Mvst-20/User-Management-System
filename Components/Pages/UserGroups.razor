@@ -216,34 +216,80 @@
             {
                 <div class="ucs-form">
                     <Alert Type="@AlertType.Info" ShowIcon="true"
-                           Message="勾选后保存将整体替换该权限组的权限。特殊权限（PERM_A/B/C）受额外限制。" />
+                           Message="@($"勾选后保存将整体替换该权限组的权限。已选 {_selectedPermissionIds.Count} 项；特殊权限（PERM_A/B/C）受额外限制。")" />
 
-                    <div class="ucs-perm-list">
-                        @foreach (var category in _permissionCategories)
-                        {
-                            <div class="ucs-perm-group">
-                                <div class="ucs-perm-group-title">@category.Key</div>
-                                @foreach (var permission in category.Value)
-                                {
-                                    <div class="ucs-perm-item">
-                                        <Checkbox Checked="_selectedPermissionIds.Contains(permission.Id)"
-                                                  CheckedChanged="@(isChecked => TogglePermission(permission.Id, isChecked))">
-                                            @permission.Name
-                                        </Checkbox>
-                                        <span class="ucs-perm-code">@permission.Code</span>
-                                        @if (permission.IsSpecial)
-                                        {
-                                            <span class="ucs-chip is-gold">特殊</span>
-                                        }
-                                        else if (permission.IsSystem)
-                                        {
-                                            <span class="ucs-chip is-default">内置</span>
-                                        }
-                                    </div>
-                                }
-                            </div>
-                        }
+                    <div class="ucs-perm-tabs" role="tablist" aria-label="权限来源">
+                        <button type="button" role="tab"
+                                aria-selected="@(_permissionTab == PermissionSourceTab.Ums ? "true" : "false")"
+                                class="@TabClass(PermissionSourceTab.Ums)"
+                                @onclick="@(() => _permissionTab = PermissionSourceTab.Ums)">
+                            <span class="ucs-perm-tab-icon"><UiIcon Name="shield-check" Size="16" /></span>
+                            <span class="ucs-perm-tab-label">UMS 权限</span>
+                            <span class="ucs-perm-tab-count" title="已选/总数">
+                                @GetSelectedCount(_umsPermissions)/@_umsPermissions.Count
+                            </span>
+                        </button>
+                        <button type="button" role="tab"
+                                aria-selected="@(_permissionTab == PermissionSourceTab.Custom ? "true" : "false")"
+                                class="@TabClass(PermissionSourceTab.Custom)"
+                                @onclick="@(() => _permissionTab = PermissionSourceTab.Custom)">
+                            <span class="ucs-perm-tab-icon"><UiIcon Name="key-round" Size="16" /></span>
+                            <span class="ucs-perm-tab-label">自定义权限</span>
+                            <span class="ucs-perm-tab-count" title="已选/总数">
+                                @GetSelectedCount(_customPermissions)/@_customPermissions.Count
+                            </span>
+                        </button>
+                        <button type="button" role="tab"
+                                aria-selected="@(_permissionTab == PermissionSourceTab.Subsystem ? "true" : "false")"
+                                class="@TabClass(PermissionSourceTab.Subsystem)"
+                                @onclick="@(() => _permissionTab = PermissionSourceTab.Subsystem)">
+                            <span class="ucs-perm-tab-icon"><UiIcon Name="box" Size="16" /></span>
+                            <span class="ucs-perm-tab-label">子系统权限</span>
+                            <span class="ucs-perm-tab-count" title="已选/总数">
+                                @GetSelectedCount(_subsystemPermissions)/@_subsystemPermissions.Count
+                            </span>
+                        </button>
                     </div>
+
+                    @{
+                        var permissionGroups = CurrentGroups.ToList();
+                    }
+                    @if (permissionGroups.Count == 0)
+                    {
+                        <div class="ucs-perm-empty">@CurrentEmptyText</div>
+                    }
+                    else
+                    {
+                        <div class="ucs-perm-list">
+                            @foreach (var category in permissionGroups)
+                            {
+                                <div class="ucs-perm-group">
+                                    <div class="ucs-perm-group-title">
+                                        <span>@category.Key</span>
+                                        <span class="ucs-perm-group-count">@category.Count()</span>
+                                    </div>
+                                    @foreach (var permission in category)
+                                    {
+                                        <div class="ucs-perm-item">
+                                            <Checkbox Checked="_selectedPermissionIds.Contains(permission.Id)"
+                                                      CheckedChanged="@(isChecked => TogglePermission(permission.Id, isChecked))">
+                                                @permission.Name
+                                            </Checkbox>
+                                            <span class="ucs-perm-code">@permission.Code</span>
+                                            @if (permission.IsSpecial)
+                                            {
+                                                <span class="ucs-chip is-gold">特殊</span>
+                                            }
+                                            else if (permission.IsSystem)
+                                            {
+                                                <span class="ucs-chip is-default">内置</span>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
                 </div>
             }
         </Modal>
@@ -275,8 +321,18 @@
     private string _newMemberId = string.Empty;
 
     private bool _permissionsVisible;
-    private Dictionary<string, List<PermissionResponse>> _permissionCategories = new();
+    private PermissionSourceTab _permissionTab = PermissionSourceTab.Ums;
+    private List<PermissionResponse> _umsPermissions = new();
+    private List<PermissionResponse> _customPermissions = new();
+    private List<PermissionResponse> _subsystemPermissions = new();
     private readonly HashSet<ulong> _selectedPermissionIds = new();
+
+    private enum PermissionSourceTab
+    {
+        Ums,
+        Custom,
+        Subsystem
+    }
 
 
     protected override void OnInitialized()
@@ -529,6 +585,7 @@
         _editing = group;
         _permissionsVisible = true;
         _success = null;
+        _permissionTab = PermissionSourceTab.Ums;
         _selectedPermissionIds.Clear();
         await LoadPermissionsAsync(group.Id);
     }
@@ -543,13 +600,26 @@
             var all = await Api.GetAsync<List<PermissionResponse>>("/api/permissions");
             if (all.Success && all.Data is { } permissions)
             {
-                _permissionCategories = permissions
-                    .GroupBy(p => p.Category)
-                    .ToDictionary(g => g.Key, g => g.OrderBy(p => p.Id).ToList());
+                var ordered = permissions
+                    .OrderBy(p => p.Category)
+                    .ThenBy(p => p.Id)
+                    .ToList();
+
+                _umsPermissions = ordered
+                    .Where(p => p.SubsystemId is null && p.IsSystem)
+                    .ToList();
+                _customPermissions = ordered
+                    .Where(p => p.SubsystemId is null && !p.IsSystem)
+                    .ToList();
+                _subsystemPermissions = ordered
+                    .Where(p => p.SubsystemId is not null)
+                    .ToList();
             }
             else
             {
-                _permissionCategories = new Dictionary<string, List<PermissionResponse>>();
+                _umsPermissions = new List<PermissionResponse>();
+                _customPermissions = new List<PermissionResponse>();
+                _subsystemPermissions = new List<PermissionResponse>();
                 _error = all.Message;
             }
 
@@ -567,6 +637,43 @@
             _detailLoading = false;
         }
     }
+
+    private IReadOnlyList<PermissionResponse> CurrentPermissions => _permissionTab switch
+    {
+        PermissionSourceTab.Custom => _customPermissions,
+        PermissionSourceTab.Subsystem => _subsystemPermissions,
+        _ => _umsPermissions
+    };
+
+    private IEnumerable<IGrouping<string, PermissionResponse>> CurrentGroups
+    {
+        get
+        {
+            if (_permissionTab == PermissionSourceTab.Subsystem)
+            {
+                return _subsystemPermissions
+                    .GroupBy(p => string.IsNullOrWhiteSpace(p.SubsystemName) ? "未命名子系统" : p.SubsystemName!)
+                    .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
+            }
+
+            return CurrentPermissions
+                .GroupBy(p => string.IsNullOrWhiteSpace(p.Category) ? "未分类" : p.Category)
+                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private string CurrentEmptyText => _permissionTab switch
+    {
+        PermissionSourceTab.Custom => "暂无自定义权限。",
+        PermissionSourceTab.Subsystem => "暂无子系统注册的权限。",
+        _ => "暂无 UMS 内置权限。"
+    };
+
+    private string TabClass(PermissionSourceTab tab)
+        => tab == _permissionTab ? "ucs-perm-tab is-active" : "ucs-perm-tab";
+
+    private int GetSelectedCount(IReadOnlyList<PermissionResponse> permissions)
+        => permissions.Count(p => _selectedPermissionIds.Contains(p.Id));
 
     private void TogglePermission(ulong permissionId, bool selected)
     {

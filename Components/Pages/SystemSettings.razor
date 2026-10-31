@@ -28,10 +28,6 @@
                             <label class="ucs-field-label">站点名称</label>
                             <Input @bind-Value="_siteName" Disabled="!_canEdit" />
                         </div>
-                        <div class="ucs-field">
-                            <label class="ucs-field-label">站点 LOGO 地址</label>
-                            <Input @bind-Value="_logoUrl" Placeholder="可选，图片直链" Disabled="!_canEdit" />
-                        </div>
                     </div>
                     <div class="ucs-switch-row">
                         <Checkbox Checked="_allowLogin" CheckedChanged="@(value => _allowLogin = value)">
@@ -47,43 +43,6 @@
                         </div>
                     </PermissionGate>
                 </div>
-            </Card>
-
-            <Card Bordered="false">
-                <div class="ucs-block-head">
-                    <h2 class="ucs-block-title">友情链接</h2>
-                    <PermissionGate Code="@PermissionCodes.SystemSettingUpdate">
-                        <Button OnClick="AddFriendLink">新增一行</Button>
-                    </PermissionGate>
-                </div>
-
-                @if (_friendLinks.Count == 0)
-                {
-                    <Alert Type="@AlertType.Info" ShowIcon="true" Message="暂无友情链接。" />
-                }
-                else
-                {
-                    <div class="ucs-link-list">
-                        @foreach (var link in _friendLinks)
-                        {
-                            <div class="ucs-link-row">
-                                <Input @bind-Value="link.Name" Placeholder="名称" Disabled="!_canEdit" />
-                                <Input @bind-Value="link.Url" Placeholder="链接地址" Disabled="!_canEdit" />
-                                <Input @bind-Value="link.Description" Placeholder="描述（可选）" Disabled="!_canEdit" />
-                                <Input @bind-Value="link.LogoUrl" Placeholder="LOGO（可选）" Disabled="!_canEdit" />
-                                <PermissionGate Code="@PermissionCodes.SystemSettingUpdate">
-                                    <Button Danger="true" OnClick="@(() => _friendLinks.Remove(link))">移除</Button>
-                                </PermissionGate>
-                            </div>
-                        }
-                    </div>
-                }
-
-                <PermissionGate Code="@PermissionCodes.SystemSettingUpdate">
-                    <div class="ucs-form-actions">
-                        <Button Type="@ButtonType.Primary" OnClick="SaveFriendLinksAsync" Loading="_saving">保存友情链接</Button>
-                    </div>
-                </PermissionGate>
             </Card>
 
         </PermissionGate>
@@ -104,11 +63,8 @@
     private string? _success;
 
     private string _siteName = string.Empty;
-    private string _logoUrl = string.Empty;
     private bool _allowLogin = true;
     private bool _allowRegister = true;
-
-    private List<FriendLink> _friendLinks = new();
 
     [Inject] private PermissionState Permissions { get; set; } = default!;
 
@@ -127,7 +83,6 @@
             if (info.Success && info.Data is { } data)
             {
                 _siteName = data.SiteName;
-                _logoUrl = data.LogoUrl ?? string.Empty;
                 _allowLogin = data.AllowLogin;
                 _allowRegister = data.AllowRegister;
             }
@@ -135,13 +90,6 @@
             {
                 _error = info.Message;
             }
-
-            var links = await Api.GetAsync<FriendLinksResponse>("/api/system/friend-links");
-            if (links.Success && links.Data is { } linkData)
-            {
-                _friendLinks = linkData.Links.ToList();
-            }
-
         }
         catch (Exception ex)
         {
@@ -152,9 +100,6 @@
             _loading = false;
         }
     }
-
-    private void AddFriendLink()
-        => _friendLinks.Add(new FriendLink(string.Empty, string.Empty));
 
     private async Task SaveSiteInfoAsync()
     {
@@ -167,7 +112,6 @@
             var body = new
             {
                 siteName = _siteName.Trim(),
-                logoUrl = _logoUrl.Trim(),
                 allowLogin = _allowLogin,
                 allowRegister = _allowRegister
             };
@@ -176,35 +120,6 @@
             if (result.Success)
             {
                 _success = "站点信息已保存。";
-            }
-            else
-            {
-                _error = result.Message;
-            }
-        }
-        finally
-        {
-            _saving = false;
-        }
-    }
-
-    private async Task SaveFriendLinksAsync()
-    {
-        _saving = true;
-        _error = null;
-        _success = null;
-
-        try
-        {
-            var cleaned = _friendLinks
-                .Where(l => !string.IsNullOrWhiteSpace(l.Name) && !string.IsNullOrWhiteSpace(l.Url))
-                .ToList();
-
-            var result = await Api.PutAsync<FriendLinksResponse>("/api/admin/system/friend-links", new { links = cleaned });
-            if (result.Success)
-            {
-                _success = "友情链接已保存。";
-                await LoadAsync();
             }
             else
             {

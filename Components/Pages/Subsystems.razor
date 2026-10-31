@@ -2,6 +2,7 @@
 @attribute [Authorize]
 
 @inject UcsApiClient Api
+@inject ModalService ModalSvc
 
 <PageTitle>子系统 · UCS 管理控制台</PageTitle>
 
@@ -68,24 +69,44 @@
                 <Column TData="SubsystemResponse" Title="最近使用">@FormatTime(context.LastUsedAt)</Column>
                 <Column TData="SubsystemResponse" Title="有效期">@FormatExpiry(context.ExpiresAt)</Column>
                 <Column TData="SubsystemResponse" Title="操作">
-                    <Space>
-                        <PermissionGate Code="@PermissionCodes.SubsystemUpdate">
-                            <Button OnClick="@(() => OpenEditAsync(context))">编辑</Button>
-                            <Button OnClick="@(() => ToggleStatusAsync(context))">
-                                @(context.IsEnabled ? "停用" : "启用")
-                            </Button>
-                            <Popconfirm Title="@RegenerateConfirmText(context)"
-                                        OnConfirm="@(_ => RegenerateAsync(context))">
-                                <Button>重置密钥</Button>
-                            </Popconfirm>
-                        </PermissionGate>
-                        <PermissionGate Code="@PermissionCodes.SubsystemDelete">
-                            <Popconfirm Title="@DeleteConfirmText(context)"
-                                        OnConfirm="@(_ => DeleteAsync(context))">
-                                <Button Danger="true">删除</Button>
-                            </Popconfirm>
-                        </PermissionGate>
-                    </Space>
+                    <PermissionGate AnyOf="@(new[]
+                                             {
+                                                 PermissionCodes.SubsystemUpdate,
+                                                 PermissionCodes.SubsystemDelete
+                                             })">
+                        <Dropdown Trigger="@(new[] { Trigger.Click })" Placement="@Placement.BottomRight">
+                            <Overlay>
+                                <Menu>
+                                    <PermissionGate Code="@PermissionCodes.SubsystemUpdate">
+                                        <MenuItem Key="edit" OnClick="@(() => OpenEditAsync(context))">
+                                            <UiIcon Name="pencil" Size="14" />
+                                            <span>编辑</span>
+                                        </MenuItem>
+                                        <MenuItem Key="toggle" OnClick="@(() => ToggleStatusAsync(context))">
+                                            <UiIcon Name="power" Size="14" />
+                                            <span>@(context.IsEnabled ? "停用" : "启用")</span>
+                                        </MenuItem>
+                                        <MenuItem Key="regenerate" OnClick="@(() => ConfirmRegenerateAsync(context))">
+                                            <UiIcon Name="refresh-cw" Size="14" />
+                                            <span>重置密钥</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                    <PermissionGate Code="@PermissionCodes.SubsystemDelete">
+                                        <MenuItem Key="delete" OnClick="@(() => ConfirmDeleteAsync(context))">
+                                            <UiIcon Name="trash" Size="14" />
+                                            <span>删除</span>
+                                        </MenuItem>
+                                    </PermissionGate>
+                                </Menu>
+                            </Overlay>
+                            <ChildContent>
+                                <button type="button" class="ucs-row-actions-trigger" title="更多操作"
+                                        aria-label="更多操作">
+                                    <UiIcon Name="ellipsis" Size="16" />
+                                </button>
+                            </ChildContent>
+                        </Dropdown>
+                    </PermissionGate>
                 </Column>
             </Table>
         </Card>
@@ -107,7 +128,8 @@
                     <label class="ucs-field-label">标识</label>
                     @if (_editing is null)
                     {
-                        <Input @bind-Value="_code" Placeholder="英文短码，如 bwb" />
+                        <Input @bind-Value="Code" BindOnInput="true"
+                               Placeholder="例：bwb" />
                     }
                     else
                     {
@@ -162,6 +184,12 @@
     private bool _editVisible;
     private string _name = string.Empty;
     private string _code = string.Empty;
+    private string Code
+    {
+        get => _code;
+        set => _code = (value ?? string.Empty).ToLowerInvariant();
+    }
+
     private string _description = string.Empty;
     private string _homeUrl = string.Empty;
     private bool _neverExpires;
@@ -277,7 +305,7 @@
                 var create = await Api.PostAsync<SubsystemCredentialResponse>("/api/subsystems", new
                 {
                     name = _name.Trim(),
-                    code = _code.Trim(),
+                    code = _code.Trim().ToLowerInvariant(),
                     description = string.IsNullOrWhiteSpace(_description) ? null : _description.Trim(),
                     homeUrl = string.IsNullOrWhiteSpace(_homeUrl) ? null : _homeUrl.Trim(),
                     expiresAt = ParseExpiresAt()
@@ -336,6 +364,22 @@
         }
     }
 
+    private async Task ConfirmRegenerateAsync(SubsystemResponse entry)
+    {
+        var confirmed = await ModalSvc.ConfirmAsync(new ConfirmOptions
+        {
+            Title = "重置密钥",
+            Content = RegenerateConfirmText(entry),
+            OkText = "重置",
+            CancelText = "取消"
+        });
+
+        if (confirmed)
+        {
+            await RegenerateAsync(entry);
+        }
+    }
+
     private async Task RegenerateAsync(SubsystemResponse entry)
     {
         var result = await Api.PostAsync<SubsystemCredentialResponse>($"/api/subsystems/{entry.Id}/regenerate-secret");
@@ -347,6 +391,22 @@
         else
         {
             _error = result.Message;
+        }
+    }
+
+    private async Task ConfirmDeleteAsync(SubsystemResponse entry)
+    {
+        var confirmed = await ModalSvc.ConfirmAsync(new ConfirmOptions
+        {
+            Title = "删除子系统",
+            Content = DeleteConfirmText(entry),
+            OkText = "删除",
+            CancelText = "取消"
+        });
+
+        if (confirmed)
+        {
+            await DeleteAsync(entry);
         }
     }
 

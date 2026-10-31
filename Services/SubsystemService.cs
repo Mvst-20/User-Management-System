@@ -29,7 +29,7 @@ public sealed class SubsystemService : ISubsystemService
 
     public async Task<(Subsystem Entry, string PlainSecret)> CreateAsync(CreateSubsystemRequest request, ulong operatorId, CancellationToken ct = default)
     {
-        var code = request.Code.Trim();
+        var code = request.Code.Trim().ToLowerInvariant();
         var name = request.Name.Trim();
 
         if (string.IsNullOrWhiteSpace(name))
@@ -88,7 +88,10 @@ public sealed class SubsystemService : ISubsystemService
         => _context.Subsystems.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id, ct);
 
     public Task<Subsystem?> GetByCodeAsync(string code, CancellationToken ct = default)
-        => _context.Subsystems.AsNoTracking().FirstOrDefaultAsync(s => s.Code == code, ct);
+    {
+        var normalizedCode = code.Trim().ToLowerInvariant();
+        return _context.Subsystems.AsNoTracking().FirstOrDefaultAsync(s => s.Code == normalizedCode, ct);
+    }
 
     public async Task<(List<Subsystem> Items, int TotalCount)> GetPagedAsync(int page, int pageSize, string? search, CancellationToken ct = default)
     {

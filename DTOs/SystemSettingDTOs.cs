@@ -1,5 +1,3 @@
-using System.Text.Json.Serialization;
-
 namespace UserManagementSystem.DTOs;
 
 // ============ 系统设置相关 DTOs ============
@@ -9,7 +7,6 @@ namespace UserManagementSystem.DTOs;
 /// </summary>
 public record SystemInfoResponse(
     string SiteName,
-    string? LogoUrl,
     bool AllowLogin,
     bool AllowRegister
 );
@@ -19,52 +16,8 @@ public record SystemInfoResponse(
 /// </summary>
 public record UpdateSystemInfoRequest(
     string? SiteName = null,
-    string? LogoUrl = null,
     bool? AllowLogin = null,
     bool? AllowRegister = null
-);
-
-/// <summary>
-/// 友情链接项
-/// </summary>
-public class FriendLink
-{
-    [JsonPropertyName("name")]
-    public string Name { get; set; } = string.Empty;
-
-    [JsonPropertyName("url")]
-    public string Url { get; set; } = string.Empty;
-
-    [JsonPropertyName("description")]
-    public string? Description { get; set; }
-
-    [JsonPropertyName("logoUrl")]
-    public string? LogoUrl { get; set; }
-
-    public FriendLink() { }
-
-    [JsonConstructor]
-    public FriendLink(string name, string url, string? description = null, string? logoUrl = null)
-    {
-        Name = name;
-        Url = url;
-        Description = description;
-        LogoUrl = logoUrl;
-    }
-}
-
-/// <summary>
-/// 友情链接列表响应
-/// </summary>
-public record FriendLinksResponse(
-    List<FriendLink> Links
-);
-
-/// <summary>
-/// 更新友情链接请求
-/// </summary>
-public record UpdateFriendLinksRequest(
-    List<FriendLink> Links
 );
 
 /// <summary>

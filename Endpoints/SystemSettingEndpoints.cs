@@ -21,14 +21,6 @@ public static class SystemSettingEndpoints
             return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", info));
         });
 
-        // 获取友情链接
-        app.MapGet("/api/system/friend-links", async (
-            [FromServices] ISystemSettingService settingService) =>
-        {
-            var links = await settingService.GetFriendLinksAsync();
-            return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", links));
-        });
-
         // ============ 管理接口（需要权限）============
 
         // 更新系统基本信息
@@ -39,17 +31,6 @@ public static class SystemSettingEndpoints
         {
             var userId = currentUser.GetRequiredUserId();
             var result = await settingService.UpdateSystemInfoAsync(request, userId);
-            return Results.Ok(new ApiResponse(ResultCodes.Success, "更新成功", result));
-        }).RequireAuthorization().RequirePermission(PermissionCodes.SystemSettingUpdate);
-
-        // 更新友情链接
-        app.MapPut("/api/admin/system/friend-links", async (
-            [FromBody] UpdateFriendLinksRequest request,
-            ClaimsPrincipal currentUser,
-            [FromServices] ISystemSettingService settingService) =>
-        {
-            var userId = currentUser.GetRequiredUserId();
-            var result = await settingService.UpdateFriendLinksAsync(request, userId);
             return Results.Ok(new ApiResponse(ResultCodes.Success, "更新成功", result));
         }).RequireAuthorization().RequirePermission(PermissionCodes.SystemSettingUpdate);
 

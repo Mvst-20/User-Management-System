@@ -380,7 +380,6 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 | GET | `/api/avatars/{filename}` | 获取头像（`?type=thumb` 获取缩略图） | - |
 | GET | `/api/permissions/custom` | 获取自定义权限列表 | - |
 | GET | `/api/system/info` | 获取系统基本信息 | - |
-| GET | `/api/system/friend-links` | 获取友情链接 | - |
 | GET | `/health` | 健康检查 | - |
 
 - Swagger UI 仅开发环境注册，访问 `/swagger` 在线调试接口。
@@ -481,20 +480,18 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 
 | 方法 | 路由 | 描述 |
 |------|------|------|
-| GET | `/api/system/info` | 系统基本信息（站点名、LOGO URL、登录/注册开关） |
-| GET | `/api/system/friend-links` | 友情链接列表 |
+| GET | `/api/system/info` | 系统基本信息（站点名、登录/注册开关） |
 
 管理接口（认证 + `system-setting` 权限）：
 
 | 方法 | 路由 | 描述 | 所需权限 |
 |------|------|------|---------|
 | PUT | `/api/admin/system/info` | 更新系统基本信息 | `system-setting:update` |
-| PUT | `/api/admin/system/friend-links` | 更新友情链接 | `system-setting:update` |
 | GET | `/api/admin/system/settings` | 获取所有系统设置 | `system-setting:read` |
 | GET | `/api/admin/system/settings/{key}` | 获取单个设置 | `system-setting:read` |
 | PUT | `/api/admin/system/settings/{key}` | 更新单个设置 | `system-setting:update` |
 
-- 系统信息键：`site_name`、`logo_url`、`allow_login`、`allow_register`，默认允许。友情链接以 JSON 数组存储，每项含 `name`、`url`、`description`（可选）、`logoUrl`（可选）。
+- 系统信息键：`site_name`、`allow_login`、`allow_register`，默认允许。
 
 ### 邮件服务配置端点（认证 + 权限）
 

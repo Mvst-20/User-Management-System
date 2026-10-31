@@ -15,16 +15,6 @@ public interface ISystemSettingService
     Task<SystemInfoResponse> UpdateSystemInfoAsync(UpdateSystemInfoRequest request, ulong updatedBy);
 
     /// <summary>
-    /// 获取友情链接
-    /// </summary>
-    Task<FriendLinksResponse> GetFriendLinksAsync();
-
-    /// <summary>
-    /// 更新友情链接
-    /// </summary>
-    Task<FriendLinksResponse> UpdateFriendLinksAsync(UpdateFriendLinksRequest request, ulong updatedBy);
-
-    /// <summary>
     /// 获取单个设置
     /// </summary>
     Task<SettingResponse?> GetSettingAsync(string key);

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using UserManagementSystem.Data;
@@ -15,20 +14,11 @@ public class SystemSettingService : ISystemSettingService
 
     private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
-    };
-
     public static class SettingKeys
     {
         public const string SiteName = "site_name";
-        public const string LogoUrl = "logo_url";
         public const string AllowLogin = "allow_login";
         public const string AllowRegister = "allow_register";
-        public const string FriendLinks = "friend_links";
     }
 
     public SystemSettingService(ApplicationDbContext context, IMemoryCache cache, ILogger<SystemSettingService> logger)
@@ -41,20 +31,16 @@ public class SystemSettingService : ISystemSettingService
     public async Task<SystemInfoResponse> GetSystemInfoAsync()
     {
         var siteName = await GetSettingValueAsync(SettingKeys.SiteName) ?? "User Management System";
-        var logoUrl = await GetSettingValueAsync(SettingKeys.LogoUrl);
         var allowLogin = await GetBoolSettingAsync(SettingKeys.AllowLogin, true);
         var allowRegister = await GetBoolSettingAsync(SettingKeys.AllowRegister, true);
 
-        return new SystemInfoResponse(siteName, logoUrl, allowLogin, allowRegister);
+        return new SystemInfoResponse(siteName, allowLogin, allowRegister);
     }
 
     public async Task<SystemInfoResponse> UpdateSystemInfoAsync(UpdateSystemInfoRequest request, ulong updatedBy)
     {
         if (request.SiteName != null)
             await SetSettingAsync(SettingKeys.SiteName, request.SiteName, "string", "站点名称", updatedBy);
-
-        if (request.LogoUrl != null)
-            await SetSettingAsync(SettingKeys.LogoUrl, request.LogoUrl, "string", "站点LOGO URL", updatedBy);
 
         if (request.AllowLogin.HasValue)
             await SetSettingAsync(SettingKeys.AllowLogin, request.AllowLogin.Value.ToString().ToLower(), "bool", "是否允许登录", updatedBy);
@@ -63,34 +49,6 @@ public class SystemSettingService : ISystemSettingService
             await SetSettingAsync(SettingKeys.AllowRegister, request.AllowRegister.Value.ToString().ToLower(), "bool", "是否允许注册", updatedBy);
 
         return await GetSystemInfoAsync();
-    }
-
-    public async Task<FriendLinksResponse> GetFriendLinksAsync()
-    {
-        var json = await GetSettingValueAsync(SettingKeys.FriendLinks);
-        if (string.IsNullOrEmpty(json))
-        {
-            return new FriendLinksResponse(new List<FriendLink>());
-        }
-
-        try
-        {
-            var links = JsonSerializer.Deserialize<List<FriendLink>>(json, JsonOptions);
-            return new FriendLinksResponse(links ?? new List<FriendLink>());
-        }
-        catch (JsonException ex)
-        {
-            _logger.LogWarning(ex, "Failed to deserialize friend links JSON: {Json}", json);
-            return new FriendLinksResponse(new List<FriendLink>());
-        }
-    }
-
-    public async Task<FriendLinksResponse> UpdateFriendLinksAsync(UpdateFriendLinksRequest request, ulong updatedBy)
-    {
-        var json = JsonSerializer.Serialize(request.Links, JsonOptions);
-        await SetSettingAsync(SettingKeys.FriendLinks, json, "json", "友情链接", updatedBy);
-
-        return new FriendLinksResponse(request.Links);
     }
 
     public async Task<SettingResponse?> GetSettingAsync(string key)

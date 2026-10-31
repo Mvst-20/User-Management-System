@@ -1145,18 +1145,10 @@ a {
 
 /* ------------------------------ 列表（用户组 / 成员 / 权限 / 设置） ------------------------------ */
 
-.ucs-link-list,
 .ucs-setting-list {
     display: flex;
     flex-direction: column;
     gap: 10px;
-}
-
-.ucs-link-row {
-    display: grid;
-    grid-template-columns: 1.1fr 1.6fr 1.4fr 1.4fr auto;
-    gap: 10px;
-    align-items: center;
 }
 
 .ucs-setting-row {
@@ -1219,6 +1211,85 @@ a {
     color: var(--ucs-ink-3);
 }
 
+/* 权限分配弹窗：来源导航（UMS / 自定义 / 子系统）
+   与整站一致的黑白直角语言：1px 缝隙分隔（同 ucs-stat-grid / ucs-member-list 的做法），
+   激活态为黑底白字（同分页当前页 / 主按钮），无渐变、无阴影、无位移。 */
+.ucs-perm-tabs {
+    display: flex;
+    gap: 1px;
+    background: var(--ucs-line);
+    border: 1px solid var(--ucs-line);
+}
+
+.ucs-perm-tab {
+    flex: 1 1 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    gap: 8px;
+    height: 40px;
+    padding: 0 14px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ucs-ink-2);
+    background: var(--ucs-bg);
+    border: none;
+    cursor: pointer;
+    transition: color var(--ucs-dur), background var(--ucs-dur);
+}
+
+.ucs-perm-tab:not(.is-active):hover {
+    color: var(--ucs-ink);
+    background: var(--ucs-bg-hover);
+}
+
+.ucs-perm-tab.is-active {
+    color: var(--ucs-ink-inverse);
+    font-weight: 600;
+    background: var(--ucs-ink);
+}
+
+.ucs-perm-tab:focus-visible {
+    outline: 2px solid var(--ucs-ink);
+    outline-offset: -2px;
+}
+
+.ucs-perm-tab-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.ucs-perm-tab-label {
+    white-space: nowrap;
+}
+
+.ucs-perm-tab-count {
+    flex: 0 0 auto;
+    min-width: 34px;
+    padding: 0 6px;
+    font-family: var(--ucs-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    line-height: 18px;
+    color: var(--ucs-ink-2);
+    text-align: center;
+    background: var(--ucs-bg-subtle);
+    border: 1px solid var(--ucs-line-mid);
+}
+
+.ucs-perm-tab:hover:not(.is-active) .ucs-perm-tab-count {
+    color: var(--ucs-ink);
+    border-color: var(--ucs-ink);
+}
+
+.ucs-perm-tab.is-active .ucs-perm-tab-count {
+    color: var(--ucs-ink-inverse);
+    background: transparent;
+    border-color: var(--ucs-ink-inverse);
+}
+
 .ucs-perm-list {
     display: flex;
     flex-direction: column;
@@ -1229,12 +1300,30 @@ a {
     padding-right: 4px;
 }
 
+.ucs-perm-empty {
+    padding: 32px 16px;
+    font-size: 12px;
+    color: var(--ucs-ink-3);
+    text-align: center;
+    border: 1px dashed var(--ucs-line-mid);
+}
+
 .ucs-perm-group-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 8px;
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+    color: var(--ucs-ink-3);
+}
+
+.ucs-perm-group-count {
+    font-family: var(--ucs-mono);
+    font-size: 10px;
+    letter-spacing: 0;
     color: var(--ucs-ink-3);
 }
 
@@ -1861,8 +1950,24 @@ a {
 .ant-dropdown .ant-menu-item .ant-dropdown-menu-title-content {
     display: inline-flex;
     align-items: center;
+    flex-wrap: nowrap;
     gap: 8px;
     min-width: 0;
+    white-space: nowrap;
+}
+
+/* 带 RouterLink 的菜单项会把内容再包一层 <a>，需同步设为 flex，避免图标与文字换行 */
+.ant-dropdown-menu-item > a,
+.ant-dropdown-menu-item .ant-menu-title-content > a,
+.ant-dropdown-menu-item .ant-dropdown-menu-title-content > a,
+.ant-dropdown .ant-menu-item .ant-menu-title-content > a {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 8px;
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
     white-space: nowrap;
 }
 
@@ -1995,6 +2100,24 @@ a {
     .ucs-metric-grid,
     .ucs-form-grid {
         grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 640px) {
+    /* 权限分配弹窗在窄屏下优先保证来源导航文字可读，隐藏计数徽标 */
+    .ucs-perm-tab {
+        gap: 6px;
+        padding: 0 8px;
+        font-size: 12px;
+    }
+
+    .ucs-perm-tab-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .ucs-perm-tab-count {
+        display: none;
     }
 }
 

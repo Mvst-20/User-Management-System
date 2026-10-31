@@ -27,9 +27,6 @@
                     <label class="ucs-field-label">权限级别</label>
                     <span>@(_level == PermissionCodes.GroupLevel.NoGroup ? "无权限组（最低）" : _level.ToString())</span>
                 </div>
-                <div class="ucs-field">
-                    <span class="ucs-field-hint">数值越小权限越高：0=初始用户，2=超级管理员，10=管理员，20=普通用户</span>
-                </div>
             </div>
         </Card>
 
@@ -51,10 +48,6 @@
                     }
                 </div>
             }
-
-            <span class="ucs-field-hint">
-                权限码为服务端展开后的结果（已包含 A/B/C 特殊权限的覆盖效果），来源于所属权限组。
-            </span>
         </Card>
     </ChildContent>
 </PageContainer>

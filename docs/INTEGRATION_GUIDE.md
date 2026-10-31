@@ -26,7 +26,7 @@ UCS（User Management System）是一个统一的用户管理与权限中心，�
 - **JWT 认证** — 签发 Access Token + Refresh Token，无状态水平扩展
 - **RBAC 权限模型** — 用户 → 权限组 → 权限 的三层关联，支持 ABC 三级特殊权限
 - **批量权限检查** — 一次请求检查多条权限，适合子系统页面/接口级鉴权
-- **系统设置** — 站点信息、友情链接、运行时配置
+- **系统设置** — 站点信息、运行时配置
 
 ### 架构简图
 
@@ -729,7 +729,6 @@ Content-Type: application/json
 | 方法 | 路径 | 权限 | 说明 |
 |------|------|------|------|
 | GET | `/api/system/info` | 无 | 获取系统基本信息 |
-| GET | `/api/system/friend-links` | 无 | 获取友情链接 |
 | GET | `/api/avatars/{filename}` | 无 | 读取头像文件 |
 | GET | `/api/admin/stats/online-users` | `admin:stats` | 在线用户数 |
 | GET | `/api/admin/stats/total-users` | `admin:stats` | 总用户数 |
@@ -744,7 +743,6 @@ Content-Type: application/json
 | GET | `/api/admin/system/settings/{key}` | `system-setting:read` | 获取单个设置项 |
 | PUT | `/api/admin/system/settings/{key}` | `system-setting:update` | 更新单个设置项 |
 | PUT | `/api/admin/system/info` | `system-setting:update` | 更新系统信息 |
-| PUT | `/api/admin/system/friend-links` | `system-setting:update` | 更新友情链接 |
 | GET | `/api/users/me/permissions` | 认证即可 | 获取当前用户展开后的有效权限码 |
 | POST | `/api/admin/users` | `user:create` | 管理员创建用户（不发送验证邮件；密码留空则生成并一次性返回） |
 | POST | `/api/admin/users/{id}/reset-password` | `user:reset-password` | 重置指定用户密码（不传 `newPassword` 则生成随机密码并一次性返回） |

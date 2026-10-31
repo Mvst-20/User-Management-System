@@ -20,13 +20,18 @@
                 <Dropdown Trigger="@(new[] { Trigger.Click })">
                     <Overlay>
                         <Menu>
-                            <MenuItem Key="my-permissions" RouterLink="/my-permissions">
-                                <UiIcon Name="shield-check" Size="14" />
-                                <span>我的权限</span>
+                            <MenuItem Key="my-permissions"
+                                      OnClick="@(_ => Navigation.NavigateTo("/my-permissions"))">
+                                <span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap;">
+                                    <UiIcon Name="shield-check" Size="14" />
+                                    <span>我的权限</span>
+                                </span>
                             </MenuItem>
                             <MenuItem Key="logout" OnClick="@(_ => LogoutAsync())">
-                                <UiIcon Name="log-out" Size="14" />
-                                <span>退出登录</span>
+                                <span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap;">
+                                    <UiIcon Name="log-out" Size="14" />
+                                    <span>退出登录</span>
+                                </span>
                             </MenuItem>
                         </Menu>
                     </Overlay>
