@@ -379,3 +379,11 @@ FodyWeavers.xsd
 
 # 运行时上传的用户头像
 /wwwroot/avatars/
+
+# 测试计划模板与执行结果
+*UMS_TestPlan*
+/docs/UMS_TestReport_*.md
+
+# 测试执行脚本与证据
+/testrun/
+

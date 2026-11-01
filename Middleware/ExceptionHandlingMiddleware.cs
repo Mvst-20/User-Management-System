@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Exceptions;
+using UserManagementSystem.Extensions;
 
 namespace UserManagementSystem.Middleware;
 
@@ -52,8 +53,7 @@ public class ExceptionHandlingMiddleware
             var method = context.Request.Method;
             var path = context.Request.Path + context.Request.QueryString;
             var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            var userId = context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
-                ?? "anonymous";
+            var userId = context.User?.GetUserId()?.ToString() ?? "anonymous";
 
             _logger.LogError(ex,
                 "[UNHANDLED] {Method} {Path} | User={UserId} | IP={IP} | Type={ExceptionType} | {Message}",

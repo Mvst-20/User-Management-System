@@ -33,17 +33,113 @@ public static class DatabaseConnection
         var fromEnvironment = Environment.GetEnvironmentVariable(EnvironmentVariableName);
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
-            return Validate(fromEnvironment.Trim(), $"{EnvironmentVariableName}（环境变量）");
+            return NormalizeCredentials(Validate(fromEnvironment.Trim(), $"{EnvironmentVariableName}（环境变量）"));
         }
 
         var fromConfiguration = configuration.GetConnectionString("Default");
         if (!string.IsNullOrWhiteSpace(fromConfiguration))
         {
-            return Validate(fromConfiguration.Trim(), $"{ConfigurationKey}（配置键）");
+            return NormalizeCredentials(Validate(fromConfiguration.Trim(), $"{ConfigurationKey}（配置键）"));
         }
 
         throw new InvalidOperationException(BuildMissingMessage());
     }
+
+    /// <summary>
+    /// 把形如 <c>server=user:password@host</c> 的连接串规范化为
+    /// <c>server=host;user=user;password=password</c>。
+    /// <para>
+    /// 这是避免凭据泄露的关键：驱动会把 <c>Server</c> 原样作为 <c>DbConnection.DataSource</c>，
+    /// 而 EF Core 的 <c>ConnectionError</c> 日志会打印该值。若不在入口拆分，
+    /// 连接失败时明文口令就会出现在日志中。显式提供的 <c>user</c>/<c>password</c>
+    /// 关键字优先，不会被覆盖。
+    /// </para>
+    /// </summary>
+    public static string NormalizeCredentials(string connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString) || !connectionString.Contains('@'))
+        {
+            return connectionString;
+        }
+
+        var segments = connectionString.Split(';', StringSplitOptions.TrimEntries);
+        var existingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var segment in segments)
+        {
+            var pair = segment.Split('=', 2);
+            if (pair.Length == 2)
+            {
+                existingKeys.Add(pair[0].Trim());
+            }
+        }
+
+        var rebuilt = new List<string>(segments.Length + 2);
+        string? userFromServer = null;
+        string? passwordFromServer = null;
+
+        foreach (var segment in segments)
+        {
+            if (string.IsNullOrWhiteSpace(segment))
+            {
+                continue;
+            }
+
+            var pair = segment.Split('=', 2);
+            if (pair.Length != 2)
+            {
+                rebuilt.Add(segment);
+                continue;
+            }
+
+            var key = pair[0].Trim();
+            var value = pair[1].Trim();
+
+            if (IsServerKey(key) && value.Contains('@'))
+            {
+                var at = value.LastIndexOf('@');
+                var userInfo = value[..at];
+                var host = value[(at + 1)..];
+                var colon = userInfo.IndexOf(':');
+
+                if (host.Length > 0 && colon > 0)
+                {
+                    userFromServer = userInfo[..colon];
+                    passwordFromServer = userInfo[(colon + 1)..];
+                    rebuilt.Add($"{key}={host}");
+                    continue;
+                }
+            }
+
+            rebuilt.Add($"{key}={value}");
+        }
+
+        if (!string.IsNullOrEmpty(userFromServer) &&
+            !existingKeys.Contains("user") &&
+            !existingKeys.Contains("userid") &&
+            !existingKeys.Contains("user id") &&
+            !existingKeys.Contains("username"))
+        {
+            rebuilt.Add($"user={userFromServer}");
+        }
+
+        if (!string.IsNullOrEmpty(passwordFromServer) &&
+            !existingKeys.Contains("password") &&
+            !existingKeys.Contains("pwd"))
+        {
+            rebuilt.Add($"password={passwordFromServer}");
+        }
+
+        return string.Join(';', rebuilt);
+    }
+
+    private static bool IsServerKey(string key)
+        => key.Equals("server", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("host", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("data source", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("datasource", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("address", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("addr", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("network address", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>连接串来源标识，用于启动日志。</summary>
     public static string DescribeSource()

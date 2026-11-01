@@ -30,15 +30,15 @@ public class UserService : IUserService
     /// </summary>
     public static string UserStatusCacheKey(long version, ulong userId) => $"status:v{version}:user:{userId}";
 
-    public async Task<User?> GetByIdAsync(ulong id)
+    public async Task<User?> GetByIdAsync(ulong id, CancellationToken ct = default)
     {
-        return await _context.Users.FindAsync(id);
+        return await _context.Users.FindAsync(new object?[] { id }, ct);
     }
 
     public async Task<User?> GetByEmailAsync(string email)
     {
         return await _context.Users
-            .FirstOrDefaultAsync(u => u.Email == email);
+            .FirstOrDefaultAsync(u => u.Email == email && u.Status != UserStatus.Deleted);
     }
 
     public async Task<User> CreateUserAsync(User user)
@@ -77,6 +77,10 @@ public class UserService : IUserService
 
         var user = await _context.Users.FindAsync(id);
         if (user == null) return false;
+
+        // 幂等：已软删除的用户再次删除时保留首次 deleted_at，供“注销用户”按日统计使用
+        if (user.Status == UserStatus.Deleted)
+            return true;
 
         user.Status = UserStatus.Deleted;
         user.DeletedAt = DateTime.UtcNow;
@@ -167,9 +171,14 @@ public class UserService : IUserService
             .FirstOrDefaultAsync(u =>
                 u.Username == login || u.Email == login);
 
-        if (user == null) return null;
+        if (user == null)
+        {
+            // 用户不存在时也执行一次同成本的 BCrypt 校验，消除账号枚举的时序侧信道
+            PasswordHasher.VerifyDummy(password);
+            return null;
+        }
 
-        if (!BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
+        if (!PasswordHasher.Verify(password, user.PasswordHash))
             return null;
 
         return user;

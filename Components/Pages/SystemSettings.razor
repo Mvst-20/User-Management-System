@@ -30,10 +30,12 @@
                         </div>
                     </div>
                     <div class="ucs-switch-row">
-                        <Checkbox Checked="_allowLogin" CheckedChanged="@(value => _allowLogin = value)">
+                        <Checkbox Checked="_allowLogin" Disabled="!_canEdit"
+                                  CheckedChanged="@(value => _allowLogin = value)">
                             允许登录
                         </Checkbox>
-                        <Checkbox Checked="_allowRegister" CheckedChanged="@(value => _allowRegister = value)">
+                        <Checkbox Checked="_allowRegister" Disabled="!_canEdit"
+                                  CheckedChanged="@(value => _allowRegister = value)">
                             允许注册
                         </Checkbox>
                     </div>
@@ -67,6 +69,7 @@
     private bool _allowRegister = true;
 
     [Inject] private PermissionState Permissions { get; set; } = default!;
+    [Inject] private SiteInfoState SiteInfo { get; set; } = default!;
 
     private bool _canEdit => Permissions.Has(PermissionCodes.SystemSettingUpdate);
 
@@ -107,11 +110,27 @@
         _error = null;
         _success = null;
 
+        // 与服务端一致的必填/长度校验，避免一次无意义的 400 往返
+        var siteName = _siteName.Trim();
+        if (siteName.Length == 0)
+        {
+            _error = "站点名称不能为空";
+            _saving = false;
+            return;
+        }
+
+        if (siteName.Length > 128)
+        {
+            _error = "站点名称不能超过 128 个字符";
+            _saving = false;
+            return;
+        }
+
         try
         {
             var body = new
             {
-                siteName = _siteName.Trim(),
+                siteName,
                 allowLogin = _allowLogin,
                 allowRegister = _allowRegister
             };
@@ -119,6 +138,9 @@
             var result = await Api.PutAsync<SystemInfoResponse>("/api/admin/system/info", body);
             if (result.Success)
             {
+                _siteName = result.Data?.SiteName ?? siteName;
+                // 同步左侧品牌标题：无需整页刷新
+                SiteInfo.Set(_siteName);
                 _success = "站点信息已保存。";
             }
             else

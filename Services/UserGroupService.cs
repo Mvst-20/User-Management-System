@@ -206,6 +206,14 @@ public class UserGroupService : IUserGroupService
             .ToListAsync();
     }
 
+    public async Task<List<ulong>> GetUserGroupIdsAsync(ulong userId)
+    {
+        return await _context.UserGroupMembers
+            .Where(m => m.UserId == userId)
+            .Select(m => m.GroupId)
+            .ToListAsync();
+    }
+
     // ============ 权限级别 ============
 
     public async Task<int> GetUserPrivilegeLevelAsync(ulong userId)

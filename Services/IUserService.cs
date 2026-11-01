@@ -4,7 +4,7 @@ namespace UserManagementSystem.Services;
 
 public interface IUserService
 {
-    Task<User?> GetByIdAsync(ulong id);
+    Task<User?> GetByIdAsync(ulong id, CancellationToken ct = default);
     Task<User?> GetByEmailAsync(string email);
     Task<User> CreateUserAsync(User user);
     Task<User> UpdateUserAsync(User user);

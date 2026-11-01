@@ -5,6 +5,8 @@
 @inject PermissionState Permissions
 @inject NavigationManager Navigation
 @inject UserManagementSystem.Configuration.AppConfiguration AppConfig
+@inject SiteInfoState SiteInfo
+@inject AuthenticationStateProvider AuthStateProvider
 
 @* 仅当确认已登录后才渲染外壳。
    AuthorizeRouteView 会把「鉴权中 / 未授权」片段一并放进本布局渲染，
@@ -61,11 +63,19 @@
     /// <summary>权限版本轮询的取消源；circuit 销毁时取消，避免后台任务泄漏。</summary>
     private CancellationTokenSource? _pollCts;
 
+    /// <summary>权限加载重入保护：轮询与首渲染可能同时触发。</summary>
+    private bool _permissionLoadInFlight;
+
     /// <summary>
     /// 在 SSR（预渲染）阶段即获取站点名称，使首次渲染就显示真实名称，
     /// 避免"先显示默认 UCS、加载完成后再替换"的闪烁。
     /// </summary>
-    protected override async Task OnInitializedAsync() => await EnsureSiteInfoLoadedAsync();
+    protected override async Task OnInitializedAsync()
+    {
+        SiteInfo.Changed += OnSiteInfoChanged;
+        _siteName = SiteInfo.SiteName;
+        await EnsureSiteInfoLoadedAsync();
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -75,7 +85,15 @@
         }
 
         Api.SessionExpired += OnSessionExpired;
-        await EnsurePermissionsLoadedAsync();
+
+        // 会话恢复（受保护 sessionStorage）是异步的：必须等认证状态就绪后再拉取权限，
+        // 否则首个权限请求可能不带令牌 → 401 → 清会话 → 跳登录（刷新后无法恢复）。
+        var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        if (authState.User.Identity?.IsAuthenticated == true)
+        {
+            await EnsurePermissionsLoadedAsync();
+        }
+
         StartPermissionPolling();
     }
 
@@ -104,13 +122,16 @@
 
             while (await timer.WaitForNextTickAsync(ct))
             {
-                if (!Permissions.Loaded)
-                {
-                    continue;
-                }
-
                 try
                 {
+                    // 首次加载可能因权限接口瞬时失败而落空：轮询必须继续重试，
+                    // 不能因为 Permissions.Loaded=false 就永久跳过（否则只能刷新页面）。
+                    if (!Permissions.Loaded)
+                    {
+                        await InvokeAsync(EnsurePermissionsLoadedAsync);
+                        continue;
+                    }
+
                     var latest = await Api.GetPermissionVersionAsync(ct);
                     if (!latest.Success || latest.Data is null)
                     {
@@ -157,8 +178,8 @@
             var result = await Api.GetAsync<SystemInfoResponse>("/api/system/info");
             if (result.Success && result.Data is { } info && !string.IsNullOrWhiteSpace(info.SiteName))
             {
-                _siteName = info.SiteName;
-                StateHasChanged();
+                // 写入共享状态：系统设置页保存后也会调用 Set，布局订阅 Changed 即时刷新
+                SiteInfo.Set(info.SiteName);
             }
         }
         catch
@@ -167,27 +188,43 @@
         }
     }
 
+    private void OnSiteInfoChanged()
+        => _ = InvokeAsync(() =>
+        {
+            _siteName = SiteInfo.SiteName;
+            StateHasChanged();
+        });
+
     private async Task EnsurePermissionsLoadedAsync()
     {
-        if (Permissions.Loaded)
+        if (Permissions.Loaded || _permissionLoadInFlight)
         {
             return;
         }
 
-        var result = await Api.GetEffectivePermissionsAsync();
-        if (result.Success && result.Data is { } data)
+        _permissionLoadInFlight = true;
+        try
         {
-            Permissions.Set(data.Codes, data.Level, data.Version);
+            var result = await Api.GetEffectivePermissionsAsync();
+            if (result.Success && result.Data is { } data)
+            {
+                Permissions.Set(data.Codes, data.Level, data.Version);
+            }
+            else if (result.Code == ResultCodes.Unauthorized)
+            {
+                Permissions.Clear();
+            }
         }
-        else if (result.Code == ResultCodes.Unauthorized)
+        finally
         {
-            Permissions.Clear();
+            _permissionLoadInFlight = false;
         }
     }
 
     public void Dispose()
     {
         Api.SessionExpired -= OnSessionExpired;
+        SiteInfo.Changed -= OnSiteInfoChanged;
 
         _pollCts?.Cancel();
         _pollCts?.Dispose();

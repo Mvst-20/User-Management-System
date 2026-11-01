@@ -51,14 +51,24 @@ public sealed class SmtpConfigService : ISmtpConfigService
             !string.IsNullOrWhiteSpace(config.Host) &&
             !string.IsNullOrWhiteSpace(config.FromAddress))
         {
-            options = new SmtpRuntimeOptions(
-                config.Host,
-                config.Port,
-                config.UseSsl,
-                config.Username,
-                DecryptPassword(config.PasswordEncrypted) ?? string.Empty,
-                config.FromAddress,
-                config.FromName);
+            // 密钥环丢失/变更导致解密失败时按注释约定降级为「未配置」，
+            // 不以空口令继续尝试连接（否则会表现为难以定位的 901）。
+            var password = DecryptPassword(config.PasswordEncrypted);
+            if (password is null && !string.IsNullOrEmpty(config.PasswordEncrypted))
+            {
+                options = null;
+            }
+            else
+            {
+                options = new SmtpRuntimeOptions(
+                    config.Host,
+                    config.Port,
+                    config.UseSsl,
+                    config.Username,
+                    password ?? string.Empty,
+                    config.FromAddress,
+                    config.FromName);
+            }
         }
 
         _cache.Set(CacheKey, options, CacheDuration);

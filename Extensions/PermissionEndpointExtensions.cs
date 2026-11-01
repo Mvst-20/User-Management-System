@@ -41,7 +41,12 @@ public static class PermissionEndpointExtensions
 
             var permissionService = httpContext.RequestServices.GetRequiredService<IPermissionService>();
 
-            if (!await permissionService.HasPermissionAsync(userId.Value, permissionCode))
+            // 鉴权查询设置 3 秒超时：数据库不可用时快速回落到最近权限快照，
+            // 避免监控/诊断端点被连接超时拖到数十秒。
+            using var permissionCts = CancellationTokenSource.CreateLinkedTokenSource(httpContext.RequestAborted);
+            permissionCts.CancelAfter(TimeSpan.FromSeconds(3));
+
+            if (!await permissionService.HasPermissionAsync(userId.Value, permissionCode, permissionCts.Token))
             {
                 return Results.Json(new ApiResponse(ResultCodes.PermissionDenied, "权限不足"), statusCode: 403);
             }

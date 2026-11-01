@@ -33,21 +33,40 @@ public static class AuthEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放注册"), statusCode: 403);
             }
 
+            // 参数校验：用户名/邮箱/密码的格式与长度（失败统一 400/code=2，不落库、不触发 500）
+            var usernameError = UserValidation.ValidateUsername(request.Username, out var username);
+            if (usernameError != null)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, usernameError));
+            }
+
+            var emailError = UserValidation.ValidateEmail(request.Email, out var email);
+            if (emailError != null)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, emailError));
+            }
+
+            var passwordError = UserValidation.ValidatePassword(request.Password);
+            if (passwordError != null)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, passwordError));
+            }
+
             // 注册速率限制（同一邮箱每分钟最多5次）
-            var rateLimitKey = $"register_rate_{request.Email}";
+            var rateLimitKey = $"register_rate_{email}";
             if (await rateLimitService.IsLimitedAsync(rateLimitKey, 5, TimeSpan.FromMinutes(1)))
             {
                 return Results.Json(new ApiResponse(ResultCodes.TooManyRequests, "请求过于频繁，请稍后再试"), statusCode: 429);
             }
 
             // 检查用户名是否已存在（排除已软删除用户）
-            if (await userService.ActiveUsernameExistsAsync(request.Username))
+            if (await userService.ActiveUsernameExistsAsync(username))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_UsernameExists, "用户名已存在"));
             }
 
             // 检查邮箱是否已存在（排除已软删除用户）
-            if (await userService.ActiveEmailExistsAsync(request.Email))
+            if (await userService.ActiveEmailExistsAsync(email))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "邮箱已被注册"));
             }
@@ -55,9 +74,9 @@ public static class AuthEndpoints
             // 创建用户（捕获并发写入导致的唯一键冲突）
             var user = new User
             {
-                Username = request.Username,
-                Email = request.Email,
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password, 12),
+                Username = username,
+                Email = email,
+                PasswordHash = PasswordHasher.Hash(request.Password!),
                 Status = UserStatus.Unverified,
                 CreatedAt = DateTime.UtcNow,
                 Extras = request.Extras?.GetRawText()
@@ -192,10 +211,10 @@ public static class AuthEndpoints
             var access = jwtService.GenerateToken(user, session.Session.Id);
             await sessionService.SetLastJtiAsync(session.Session.Id, access.Jti);
 
-            // 更新最后登录信息
+            // 更新最后登录信息：只标记已跟踪实体的字段，由 CreateSessionAsync / LogAsync
+            // 的 SaveChanges 一并提交，避免每次登录额外一次 SELECT + UPDATE（并发下会放大 users 行锁竞争）。
             user.LastLoginIp = device.Ip;
             user.LastLoginAt = DateTime.UtcNow;
-            await userService.UpdateUserAsync(user);
 
             await sessionService.LogAsync(new LoginLog
             {
@@ -226,11 +245,16 @@ public static class AuthEndpoints
             [FromServices] IJwtService jwtService,
             [FromServices] IIpLocationResolver locations,
             [FromServices] ISystemSettingService systemSettingService,
+            [FromServices] IRateLimitService rateLimitService,
             [FromServices] AppConfiguration appConfig,
             HttpContext context) =>
         {
+            var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var refreshRateLimitKey = $"refresh_ip_{clientIp}";
+
             if (string.IsNullOrWhiteSpace(request.RefreshToken))
             {
+                await rateLimitService.IncrementAsync(refreshRateLimitKey, TimeSpan.FromMinutes(1));
                 return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "Refresh Token 不能为空"));
             }
 
@@ -240,10 +264,18 @@ public static class AuthEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放登录"), statusCode: 403);
             }
 
+            // 刷新接口限流：无效 refresh 会触发会话查询，需防止被大量无效请求放大数据库压力。
+            // 仅对无效请求计数；达到阈值后统一返回 429/code=7。
+            if (await rateLimitService.GetCountAsync(refreshRateLimitKey) >= 30)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.TooManyRequests, "请求过于频繁，请稍后再试"), statusCode: 429);
+            }
+
             var device = DeviceInfoFactory.FromRequest(context, locations);
             var rotated = await sessionService.RotateAsync(request.RefreshToken, device);
             if (rotated == null)
             {
+                await rateLimitService.IncrementAsync(refreshRateLimitKey, TimeSpan.FromMinutes(1));
                 return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "Refresh Token 无效或已过期"), statusCode: 401);
             }
 
@@ -428,7 +460,7 @@ public static class AuthEndpoints
             HttpContext httpContext) =>
         {
             var userId = httpContext.User.GetUserId();
-            var sessionId = httpContext.User.FindFirst(JwtClaimNames.SessionId)?.Value;
+            var sessionId = httpContext.User.GetSessionId();
 
             if (userId.HasValue && !string.IsNullOrEmpty(sessionId))
             {
@@ -436,7 +468,7 @@ public static class AuthEndpoints
             }
 
             // 撤销当前 Token
-            var jti = httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+            var jti = httpContext.User.GetJti();
             if (jti != null)
             {
                 await tokenBlacklistService.BlacklistAsync(jti, DateTime.UtcNow.AddMinutes(appConfig.Jwt.ExpiryMinutes));

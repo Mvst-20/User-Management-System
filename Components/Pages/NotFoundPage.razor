@@ -1,0 +1,23 @@
+@page "/not-found"
+@attribute [AllowAnonymous]
+
+@* 未知路由的 404 页面。
+   服务端在检测到前端路由 404 后，内部重执行本页（响应状态仍为 404），
+   从而直接访问未知路径时也能看到控制台风格的「页面不存在」，而不是 Kestrel 原生 404。
+   客户端路由导航到未知路径时则由 Routes.razor 的 <NotFound> 分支渲染同一文案。 *@
+
+@inject NavigationManager Navigation
+
+<PageTitle>页面不存在 · UCS 管理控制台</PageTitle>
+
+<PageContainer Title="页面不存在">
+    <Card Bordered="false">
+        <div class="ucs-empty-state">
+            <div class="ucs-empty-code">404</div>
+            <h2 class="ucs-empty-title">抱歉，你访问的页面不存在</h2>
+            <Button Type="@ButtonType.Primary" OnClick="@(() => Navigation.NavigateTo("/"))">
+                返回仪表盘
+            </Button>
+        </div>
+    </Card>
+</PageContainer>

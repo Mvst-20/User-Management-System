@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace UserManagementSystem.Configuration;
 
 /// <summary>
@@ -5,7 +7,32 @@ namespace UserManagementSystem.Configuration;
 /// </summary>
 public static class AppInfo
 {
-    public const string Version = "v1.0.0";
+    /// <summary>
+    /// 应用版本号：统一取自程序集 <c>InformationalVersion</c>（项目文件中的 Version），
+    /// 避免启动横幅、系统信息接口与发布文档各自维护导致版本不一致。
+    /// </summary>
+    public static string Version { get; } = ResolveVersion();
+
+    private static string ResolveVersion()
+    {
+        var informational = typeof(AppInfo).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+        if (!string.IsNullOrWhiteSpace(informational))
+        {
+            // 去掉 SourceRevisionId 追加的 "+<commit>" 后缀
+            var plus = informational.IndexOf('+');
+            if (plus >= 0)
+            {
+                informational = informational[..plus];
+            }
+
+            informational = informational.Trim();
+            return informational.StartsWith('v') ? informational : "v" + informational;
+        }
+
+        return "v1.5.0";
+    }
 }
 
 public class AppConfiguration
@@ -22,6 +49,12 @@ public class JwtConfig
     public string Issuer { get; set; } = string.Empty;
     public string Audience { get; set; } = string.Empty;
     public int ExpiryMinutes { get; set; } = 120;
+
+    /// <summary>
+    /// 是否要求 JWT 密钥必须由外部注入（环境变量 <c>Jwt__Key</c> / 配置项 <c>Jwt:Key</c>）。
+    /// 为 true 时缺失可用密钥将直接启动失败；为 false 时允许自动生成到 keys/ 目录（本地开发兜底）。
+    /// </summary>
+    public bool RequireExternalKey { get; set; }
 
     /// <summary>Refresh Token（会话）有效期天数。</summary>
     public int RefreshTokenDays { get; set; } = 30;

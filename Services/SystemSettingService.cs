@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using UserManagementSystem.Data;
 using UserManagementSystem.DTOs;
+using UserManagementSystem.Exceptions;
 using UserManagementSystem.Models;
 
 namespace UserManagementSystem.Services;
@@ -14,12 +15,31 @@ public class SystemSettingService : ISystemSettingService
 
     private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
 
+    /// <summary>站点名称长度上限（DB 为 TEXT，这里做业务侧约束，避免写入超长内容）。</summary>
+    public const int SiteNameMaxLength = 128;
+
     public static class SettingKeys
     {
         public const string SiteName = "site_name";
         public const string AllowLogin = "allow_login";
         public const string AllowRegister = "allow_register";
     }
+
+    /// <summary>默认站点名称（与首次初始化播种的值一致）。</summary>
+    public const string DefaultSiteName = "User Management System";
+
+    /// <summary>
+    /// 已知设置项白名单：键 → (值类型, 描述, 规范化函数)。
+    /// 未知键不再静默落库，避免配置表被任意写入污染。
+    /// </summary>
+    private static readonly Dictionary<string, SettingDefinition> KnownSettings = new(StringComparer.Ordinal)
+    {
+        [SettingKeys.SiteName] = new("string", "站点名称", NormalizeSiteName),
+        [SettingKeys.AllowLogin] = new("bool", "是否允许登录", NormalizeBool),
+        [SettingKeys.AllowRegister] = new("bool", "是否允许注册", NormalizeBool)
+    };
+
+    private sealed record SettingDefinition(string ValueType, string Description, Func<string, string> Normalize);
 
     public SystemSettingService(ApplicationDbContext context, IMemoryCache cache, ILogger<SystemSettingService> logger)
     {
@@ -30,7 +50,7 @@ public class SystemSettingService : ISystemSettingService
 
     public async Task<SystemInfoResponse> GetSystemInfoAsync()
     {
-        var siteName = await GetSettingValueAsync(SettingKeys.SiteName) ?? "User Management System";
+        var siteName = await GetSettingValueAsync(SettingKeys.SiteName) ?? DefaultSiteName;
         var allowLogin = await GetBoolSettingAsync(SettingKeys.AllowLogin, true);
         var allowRegister = await GetBoolSettingAsync(SettingKeys.AllowRegister, true);
 
@@ -40,13 +60,21 @@ public class SystemSettingService : ISystemSettingService
     public async Task<SystemInfoResponse> UpdateSystemInfoAsync(UpdateSystemInfoRequest request, ulong updatedBy)
     {
         if (request.SiteName != null)
-            await SetSettingAsync(SettingKeys.SiteName, request.SiteName, "string", "站点名称", updatedBy);
+        {
+            await UpdateSettingAsync(SettingKeys.SiteName, new UpdateSettingRequest(request.SiteName), updatedBy);
+        }
 
         if (request.AllowLogin.HasValue)
-            await SetSettingAsync(SettingKeys.AllowLogin, request.AllowLogin.Value.ToString().ToLower(), "bool", "是否允许登录", updatedBy);
+        {
+            await UpdateSettingAsync(SettingKeys.AllowLogin,
+                new UpdateSettingRequest(request.AllowLogin.Value ? "true" : "false"), updatedBy);
+        }
 
         if (request.AllowRegister.HasValue)
-            await SetSettingAsync(SettingKeys.AllowRegister, request.AllowRegister.Value.ToString().ToLower(), "bool", "是否允许注册", updatedBy);
+        {
+            await UpdateSettingAsync(SettingKeys.AllowRegister,
+                new UpdateSettingRequest(request.AllowRegister.Value ? "true" : "false"), updatedBy);
+        }
 
         return await GetSystemInfoAsync();
     }
@@ -69,13 +97,18 @@ public class SystemSettingService : ISystemSettingService
 
     public async Task<SettingResponse> UpdateSettingAsync(string key, UpdateSettingRequest request, ulong updatedBy)
     {
-        // 保留已存在设置的 ValueType（如 bool/json），避免被覆盖为 string；仅新建时默认为 string
-        var existingType = await _context.SystemSettings
-            .Where(s => s.Key == key)
-            .Select(s => s.ValueType)
-            .FirstOrDefaultAsync();
+        var normalizedKey = (key ?? string.Empty).Trim();
+        if (!KnownSettings.TryGetValue(normalizedKey, out var definition))
+        {
+            throw new BusinessException(ResultCodes.ValidationError, "未知的设置项");
+        }
 
-        var setting = await SetSettingAsync(key, request.Value, existingType ?? "string", null, updatedBy);
+        // 严格类型校验：例如 allow_login 只接受 true/false/1/0，
+        // 避免写入 "abc" 后 GetBoolSettingAsync 误判为 false 而关闭全站登录。
+        var normalizedValue = definition.Normalize(request.Value ?? string.Empty);
+
+        var setting = await SetSettingAsync(
+            normalizedKey, normalizedValue, definition.ValueType, definition.Description, updatedBy);
 
         return new SettingResponse(
             setting.Key,
@@ -99,6 +132,45 @@ public class SystemSettingService : ISystemSettingService
             s.Description,
             s.UpdatedAt
         )).ToList();
+    }
+
+    /// <summary>
+    /// 幂等播种默认设置：全新库首次启动后即可在「系统设置」中看到三个键（O-02），
+    /// 而不是仅靠读取路径的默认值兜底。
+    /// </summary>
+    public async Task EnsureDefaultsAsync(CancellationToken ct = default)
+    {
+        var existingKeys = await _context.SystemSettings
+            .Select(s => s.Key)
+            .ToListAsync(ct);
+
+        var missing = new List<SystemSetting>();
+        foreach (var (key, definition) in KnownSettings)
+        {
+            if (existingKeys.Contains(key))
+            {
+                continue;
+            }
+
+            missing.Add(new SystemSetting
+            {
+                Key = key,
+                Value = key == SettingKeys.SiteName ? DefaultSiteName : "true",
+                ValueType = definition.ValueType,
+                Description = definition.Description,
+                UpdatedAt = DateTime.UtcNow,
+                UpdatedBy = 0
+            });
+        }
+
+        if (missing.Count == 0)
+        {
+            return;
+        }
+
+        _context.SystemSettings.AddRange(missing);
+        await _context.SaveChangesAsync(ct);
+        _logger.LogInformation("Seeded {Count} default system settings", missing.Count);
     }
 
     public async Task<string?> GetSettingValueAsync(string key)
@@ -166,5 +238,38 @@ public class SystemSettingService : ISystemSettingService
         _logger.LogInformation("Setting '{Key}' updated by user {UserId}", key, updatedBy);
 
         return setting;
+    }
+
+    private static string NormalizeSiteName(string value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        if (trimmed.Length == 0)
+        {
+            throw new BusinessException(ResultCodes.ValidationError, "站点名称不能为空");
+        }
+
+        if (trimmed.Length > SiteNameMaxLength)
+        {
+            throw new BusinessException(ResultCodes.ValidationError,
+                $"站点名称不能超过 {SiteNameMaxLength} 个字符");
+        }
+
+        return trimmed;
+    }
+
+    private static string NormalizeBool(string value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        if (trimmed.Equals("true", StringComparison.OrdinalIgnoreCase) || trimmed == "1")
+        {
+            return "true";
+        }
+
+        if (trimmed.Equals("false", StringComparison.OrdinalIgnoreCase) || trimmed == "0")
+        {
+            return "false";
+        }
+
+        throw new BusinessException(ResultCodes.ValidationError, "该设置的值必须为 true 或 false");
     }
 }

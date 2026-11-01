@@ -191,6 +191,8 @@ public static class AvatarEndpoints
             ulong id,
             IFormFile? file,
             [FromServices] IUserService userService,
+            [FromServices] IPermissionService permissionService,
+            [FromServices] IUserGroupService userGroupService,
             HttpContext httpContext) =>
         {
             var logger = httpContext.RequestServices.GetRequiredService<ILoggerFactory>()
@@ -223,6 +225,29 @@ public static class AvatarEndpoints
             {
                 logger.LogWarning("[AVATAR-UPLOAD] FAIL: user {UserId} is banned", id);
                 return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
+            }
+
+            // 授权：本人可操作自己的头像；操作他人需要 user:update（管理员能力）且目标级别低于自己。
+            // 仅持有全局 avatar:upload 的普通用户不能覆盖他人头像。
+            var actorId = httpContext.User.GetUserId();
+            if (actorId is null)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "未授权"), statusCode: 401);
+            }
+
+            if (actorId.Value != id)
+            {
+                if (!await permissionService.HasPermissionAsync(actorId.Value, PermissionCodes.UserUpdate))
+                {
+                    logger.LogWarning("[AVATAR-UPLOAD] FAIL: user {ActorId} has no user:update to modify user {UserId}", actorId.Value, id);
+                    return Results.Json(new ApiResponse(ResultCodes.PermissionDenied, "权限不足"), statusCode: 403);
+                }
+
+                var privilegeResult = await httpContext.ValidatePrivilegeLevelAsync(userGroupService, id);
+                if (privilegeResult is not null)
+                {
+                    return privilegeResult;
+                }
             }
 
             // 验证文件扩展名（防止 XSS：拒绝 .html/.svg 等）
@@ -333,6 +358,8 @@ public static class AvatarEndpoints
         app.MapDelete("/api/users/{id}/avatar", async (
             ulong id,
             [FromServices] IUserService userService,
+            [FromServices] IPermissionService permissionService,
+            [FromServices] IUserGroupService userGroupService,
             HttpContext httpContext) =>
         {
             var user = await userService.GetByIdAsync(id);
@@ -344,6 +371,27 @@ public static class AvatarEndpoints
             if (user.Status == UserStatus.Banned)
             {
                 return Results.Json(new ApiResponse(ResultCodes.AccountBanned, "账号已被封禁"), statusCode: 403);
+            }
+
+            // 与上传一致：本人可删除自己的头像；删除他人需要 user:update 且目标级别低于自己
+            var actorId = httpContext.User.GetUserId();
+            if (actorId is null)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "未授权"), statusCode: 401);
+            }
+
+            if (actorId.Value != id)
+            {
+                if (!await permissionService.HasPermissionAsync(actorId.Value, PermissionCodes.UserUpdate))
+                {
+                    return Results.Json(new ApiResponse(ResultCodes.PermissionDenied, "权限不足"), statusCode: 403);
+                }
+
+                var privilegeResult = await httpContext.ValidatePrivilegeLevelAsync(userGroupService, id);
+                if (privilegeResult is not null)
+                {
+                    return privilegeResult;
+                }
             }
 
             // 删除头像文件（原图 + 缩略图）

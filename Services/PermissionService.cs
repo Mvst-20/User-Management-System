@@ -173,9 +173,9 @@ public class PermissionService : IPermissionService
 
     // ============ 权限检查 ============
 
-    public async Task<bool> HasPermissionAsync(ulong userId, string permissionCode)
+    public async Task<bool> HasPermissionAsync(ulong userId, string permissionCode, CancellationToken ct = default)
     {
-        var permissionCodes = await GetUserPermissionCodesAsync(userId);
+        var permissionCodes = await GetUserPermissionCodesAsync(userId, ct);
 
         // A 权限：拥有全站所有权限
         if (permissionCodes.Contains(PermissionCodes.PermA))
@@ -195,36 +195,58 @@ public class PermissionService : IPermissionService
         return permissionCodes.Contains(permissionCode);
     }
 
-    public async Task<List<string>> GetUserPermissionCodesAsync(ulong userId)
+    public async Task<List<string>> GetUserPermissionCodesAsync(ulong userId, CancellationToken ct = default)
     {
-        var version = await _cacheVersionService.GetVersionAsync(CacheScopes.Permission);
+        var version = await _cacheVersionService.GetVersionAsync(CacheScopes.Permission, ct);
         var cacheKey = UserPermissionCacheKey(version, userId);
         var ttl = CacheTtlFor(version);
 
         if (_cache.TryGetValue(cacheKey, out List<string>? cachedPermissions) && cachedPermissions != null)
             return cachedPermissions;
 
-        var groupIds = await _context.UserGroupMembers
-            .Where(m => m.UserId == userId)
-            .Select(m => m.GroupId)
-            .ToListAsync();
+        var snapshotKey = LastKnownPermissionCacheKey(userId);
 
-        if (!groupIds.Any())
+        try
         {
-            // 缓存空结果，避免每次无权限用户请求都查询数据库
-            _cache.Set(cacheKey, new List<string>(), ttl);
+            var groupIds = await _context.UserGroupMembers
+                .Where(m => m.UserId == userId)
+                .Select(m => m.GroupId)
+                .ToListAsync(ct);
+
+            List<string> permissionCodes;
+            if (!groupIds.Any())
+            {
+                // 缓存空结果，避免每次无权限用户请求都查询数据库
+                permissionCodes = new List<string>();
+            }
+            else
+            {
+                permissionCodes = await _context.UserGroupPermissions
+                    .Where(gp => groupIds.Contains(gp.GroupId))
+                    .Select(gp => gp.Permission.Code)
+                    .Distinct()
+                    .ToListAsync(ct);
+            }
+
+            _cache.Set(cacheKey, permissionCodes, ttl);
+
+            // 最近一次成功快照：数据库短暂不可用时用于鉴权降级，避免监控/诊断端点因 500 不可达
+            _cache.Set(snapshotKey, permissionCodes, TimeSpan.FromMinutes(30));
+            return permissionCodes;
+        }
+        catch (Exception ex)
+        {
+            // 包含超时/取消：鉴权查询设置了短超时，超时同样应回落到最近快照而不是 500
+            _logger.LogWarning(ex, "读取用户 {UserId} 的权限失败（数据库可能不可用或查询超时），尝试使用最近一次快照", userId);
+
+            if (_cache.TryGetValue(snapshotKey, out List<string>? lastKnown) && lastKnown is not null)
+            {
+                return lastKnown;
+            }
+
+            // 无快照时按“无权限”处理（fail-closed），不把数据库异常暴露为 500
             return new List<string>();
         }
-
-        var permissionCodes = await _context.UserGroupPermissions
-            .Where(gp => groupIds.Contains(gp.GroupId))
-            .Select(gp => gp.Permission.Code)
-            .Distinct()
-            .ToListAsync();
-
-        _cache.Set(cacheKey, permissionCodes, ttl);
-
-        return permissionCodes;
     }
 
     public async Task<List<string>> GetEffectivePermissionCodesAsync(ulong userId)
@@ -265,12 +287,24 @@ public class PermissionService : IPermissionService
         if (_cache.TryGetValue(cacheKey, out List<string>? cached) && cached != null)
             return cached;
 
-        var allCodes = await _context.Permissions.Select(p => p.Code).ToListAsync();
-        _cache.Set(cacheKey, allCodes, ttl);
-        return allCodes;
+        try
+        {
+            var allCodes = await _context.Permissions.Select(p => p.Code).ToListAsync();
+            _cache.Set(cacheKey, allCodes, ttl);
+            return allCodes;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A 权限的鉴权本身已在 HasPermissionAsync 中直接命中，这里仅用于前端展开；
+            // 数据库不可用时返回空集合即可，不抛出 500。
+            _logger.LogWarning(ex, "读取全量权限码失败（数据库可能不可用），本次返回空集合");
+            return new List<string>();
+        }
     }
 
     private static string UserPermissionCacheKey(long version, ulong userId) => $"perm:v{version}:user:{userId}";
+
+    private static string LastKnownPermissionCacheKey(ulong userId) => $"perm:last:user:{userId}";
 
     private static string AllPermissionCodesCacheKey(long version) => $"perm:v{version}:all";
 
@@ -569,12 +603,12 @@ public class PermissionService : IPermissionService
             }
         }
 
-        // 普通用户
+        // 普通用户：仅自助能力（本人资料/改密/改邮箱/头像/会话自助），
+        // 不含 user:read / user:update —— 否则任何普通用户都能读取、封禁他人账号。
         if (groupByName.TryGetValue(PermissionCodes.NormalGroupName, out var normalGroup))
         {
             var normalPermCodes = new[]
             {
-                PermissionCodes.UserRead, PermissionCodes.UserUpdate,
                 PermissionCodes.UserChangePassword, PermissionCodes.UserChangeEmail,
                 PermissionCodes.UserLogout, PermissionCodes.AvatarUpload, PermissionCodes.AvatarDelete,
                 PermissionCodes.SessionRead, PermissionCodes.SessionRevoke, PermissionCodes.LoginHistoryRead

@@ -4,6 +4,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 版本号统一来源：启动横幅、/api/admin/server/status 与发布说明 -->
+    <Version>1.5.0</Version>
     <!-- EF Core 和 Data Annotations 不完全兼容 trimming，抑制相关警告 -->
     <NoWarn>$(NoWarn);IL3050;IL2026</NoWarn>
   </PropertyGroup>
@@ -21,6 +23,9 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="8.0.2" />
+    <!-- 安全修复（DEF-037）：直接引用覆盖 Pomelo 传递依赖中的漏洞版本 -->
+    <PackageReference Include="MySqlConnector" Version="2.6.2" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.2" />
     <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
     <PackageReference Include="Serilog.Enrichers.Environment" Version="3.0.1" />
     <PackageReference Include="Serilog.Enrichers.Thread" Version="4.0.0" />

@@ -41,6 +41,45 @@ public static class WebApplicationExtensions
 
         app.UseMiddleware<ExceptionHandlingMiddleware>();
 
+        // 未知前端路由：404 后内部重执行 /not-found，渲染控制台风格的「页面不存在」页。
+        // 只处理 GET 且非 /api、非静态资源路径，保证 API 的 404 语义与 access 日志探测不变。
+        // 注意：必须位于 UseRouting 之前，内部重执行才会重新匹配 /not-found 端点。
+        app.Use(async (context, next) =>
+        {
+            await next();
+
+            if (context.Response.StatusCode != StatusCodes.Status404NotFound || context.Response.HasStarted)
+            {
+                return;
+            }
+
+            if (!HttpMethods.IsGet(context.Request.Method))
+            {
+                return;
+            }
+
+            var path = context.Request.Path;
+            if (path.StartsWithSegments("/api") ||
+                path.StartsWithSegments("/avatars") ||
+                path.StartsWithSegments("/health") ||
+                path.StartsWithSegments("/swagger") ||
+                path.StartsWithSegments("/_blazor") ||
+                path.StartsWithSegments("/_framework") ||
+                path.StartsWithSegments("/_content") ||
+                (path.Value?.Contains('.') ?? false))
+            {
+                return;
+            }
+
+            context.Request.Path = "/not-found";
+            context.SetEndpoint(null);
+            await next();
+        });
+
+        // 显式 UseRouting：上面的 404 重执行依赖“路由在该中间件之后”，
+        // 若使用框架自动插入的 UseRouting（位于管道最前），重执行不会重新匹配端点。
+        app.UseRouting();
+
         EnsureDirectories();
 
         if (app.Environment.IsDevelopment())

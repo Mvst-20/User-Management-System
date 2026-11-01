@@ -51,7 +51,8 @@ public static class SubsystemEndpoints
             [FromQuery] string? search = null) =>
         {
             if (page < 1) page = 1;
-            if (pageSize < 1 || pageSize > 100) pageSize = 20;
+            if (pageSize < 1) pageSize = 20;
+            if (pageSize > 100) pageSize = 100; // 与其他分页接口统一：越界截断到 100
 
             var (items, totalCount) = await subsystemService.GetPagedAsync(page, pageSize, search);
 

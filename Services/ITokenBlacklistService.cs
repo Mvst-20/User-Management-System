@@ -16,5 +16,5 @@ public interface ITokenBlacklistService
     /// <summary>
     /// 检查 Token 的 jti 是否在黑名单中
     /// </summary>
-    Task<bool> IsBlacklistedAsync(string jti);
+    Task<bool> IsBlacklistedAsync(string jti, CancellationToken ct = default);
 }

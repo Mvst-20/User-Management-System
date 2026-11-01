@@ -30,6 +30,12 @@ public interface ISystemSettingService
     Task<List<SettingResponse>> GetAllSettingsAsync();
 
     /// <summary>
+    /// 幂等播种默认设置（site_name / allow_login / allow_register）。
+    /// 首次启动后即可在设置列表看到默认值，而不是仅靠读取路径兜底。
+    /// </summary>
+    Task EnsureDefaultsAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// 获取设置值（内部使用）
     /// </summary>
     Task<string?> GetSettingValueAsync(string key);

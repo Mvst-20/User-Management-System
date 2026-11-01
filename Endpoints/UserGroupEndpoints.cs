@@ -304,15 +304,12 @@ public static class UserGroupEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UserGroupNotFound, "用户组不存在"));
             }
 
-            if (group.IsMemberLocked)
-            {
-                return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupMemberLocked, "该用户组成员锁定，不可移除"));
-            }
-
-            // 级别校验：不能移除同级或更高级用户（含自己）的组成员资格
+            // 成员锁定组（初始用户组）允许“移除成员”：这是误加成员后唯一的修复路径，
+            // 且移除只会降低权限、不会提权。添加成员仍由上面的 IsMemberLocked 检查拒绝。
+            // 级别校验：非锁定组仍不允许移除同级或更高级用户（含自己）。
             var actorLevel = await userGroupService.GetUserPrivilegeLevelAsync(actorId.Value);
             var targetLevel = await userGroupService.GetUserPrivilegeLevelAsync(userId);
-            if (targetLevel <= actorLevel)
+            if (targetLevel <= actorLevel && !group.IsMemberLocked)
             {
                 return Results.Json(new ApiResponse(ResultCodes.UpdateUserFail_PrivilegeLevel,
                     $"不能管理同级或更高级的用户（自身 {actorLevel}，目标 {targetLevel}）"), statusCode: 403);
@@ -344,8 +341,9 @@ public static class UserGroupEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UserGroupNotFound, "用户组不存在"));
             }
 
-            // 成员锁定（如初始用户组）或受保护（如超级管理员组）的用户组不可修改权限
-            if (group.IsMemberLocked || group.IsProtected)
+            // 成员锁定（如初始用户组）的用户组不可修改权限；
+            // 超级管理员组虽受保护，但按文档约定“成员与权限可修改”（仅不可删除）。
+            if (group.IsMemberLocked)
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupProtected, "该用户组权限不可修改"));
             }

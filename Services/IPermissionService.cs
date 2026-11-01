@@ -10,8 +10,8 @@ namespace UserManagementSystem.Services;
 public interface IPermissionService
 {
     // ============ 权限检查 ============
-    Task<bool> HasPermissionAsync(ulong userId, string permissionCode);
-    Task<List<string>> GetUserPermissionCodesAsync(ulong userId);
+    Task<bool> HasPermissionAsync(ulong userId, string permissionCode, CancellationToken ct = default);
+    Task<List<string>> GetUserPermissionCodesAsync(ulong userId, CancellationToken ct = default);
 
     /// <summary>
     /// 获取用户"有效权限码"集合：在原始权限码基础上展开 A/B/C 特殊权限的覆盖效果

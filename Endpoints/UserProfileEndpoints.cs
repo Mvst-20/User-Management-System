@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using UserManagementSystem.Configuration;
 using UserManagementSystem.DTOs;
 using UserManagementSystem.Extensions;
@@ -150,16 +151,65 @@ public static class UserProfileEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.UpdateUserFail_Forbidden, "不能修改自己的权限组"), statusCode: 403);
             }
 
-            // 权限级别校验：不能调整权限级别不低于自己的用户的权限组
-            var privilegeResult = await httpContext.ValidatePrivilegeLevelAsync(userGroupService, id);
-            if (privilegeResult is not null) return privilegeResult;
-
-            // 只能分配级别严格低于自己的权限组（数值更大），否则可造出同级或更高级的用户
+            // 权限组设置：允许“纯移除成员锁定组”的修复路径（只降权、不提权）
             var actorId = httpContext.User.GetUserId();
-            if (actorId is not null)
+            if (actorId is null)
             {
-                var actorLevel = await userGroupService.GetUserPrivilegeLevelAsync(actorId.Value);
-                var groupLevels = await userGroupService.GetGroupLevelsAsync(request.GroupIds);
+                return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "未授权"), statusCode: 401);
+            }
+
+            var currentGroupIds = await userGroupService.GetUserGroupIdsAsync(id);
+            var requestedGroupIds = request.GroupIds?.Distinct().ToList() ?? new List<ulong>();
+
+            // 读取涉及到的组（组不存在时返回 1100，而不是通用 code=1）
+            var groups = new Dictionary<ulong, UserGroup?>();
+            foreach (var groupId in currentGroupIds.Concat(requestedGroupIds).Distinct())
+            {
+                groups[groupId] = await userGroupService.GetGroupByIdAsync(groupId);
+            }
+
+            var missingGroupIds = requestedGroupIds
+                .Where(groupId => groups.GetValueOrDefault(groupId) is null)
+                .ToList();
+            if (missingGroupIds.Count > 0)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupNotFound,
+                    $"用户组不存在：{string.Join("/", missingGroupIds)}"));
+            }
+
+            // 成员锁定的受保护组（初始用户组）不可“新分配”；先于级别校验，保证 1125 可达。
+            var lockedNewGroupIds = requestedGroupIds
+                .Where(groupId => !currentGroupIds.Contains(groupId) && groups[groupId]!.IsMemberLocked)
+                .ToList();
+            if (lockedNewGroupIds.Count > 0)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.UserGroupLockedGroupNotAssignable, "受保护权限组不可分配"),
+                    statusCode: 403);
+            }
+
+            // 级别校验：目标级别不低于自己时，仅允许“移除成员锁定组”的纯降权操作。
+            var actorLevel = await userGroupService.GetUserPrivilegeLevelAsync(actorId.Value);
+            var targetLevel = await userGroupService.GetUserPrivilegeLevelAsync(id);
+            if (targetLevel <= actorLevel)
+            {
+                var removedGroupIds = currentGroupIds.Except(requestedGroupIds).ToList();
+                var removesLockedGroup = removedGroupIds
+                    .Any(groupId => groups.GetValueOrDefault(groupId)?.IsMemberLocked == true);
+                var pureRemoval = requestedGroupIds.All(currentGroupIds.Contains) && removesLockedGroup;
+
+                if (!pureRemoval)
+                {
+                    return Results.Json(new ApiResponse(ResultCodes.UpdateUserFail_PrivilegeLevel,
+                        $"目标用户的权限级别不低于你（目标 {targetLevel}，自身 {actorLevel}），无法操作"),
+                        statusCode: 403);
+                }
+            }
+
+            // 新增的组必须严格低于操作者级别（数值更大）
+            var newGroupIds = requestedGroupIds.Where(groupId => !currentGroupIds.Contains(groupId)).ToList();
+            if (newGroupIds.Count > 0)
+            {
+                var groupLevels = await userGroupService.GetGroupLevelsAsync(newGroupIds);
                 var illegal = groupLevels
                     .Where(pair => !PrivilegeLevelExtensions.CanManageGroup(actorLevel, pair.Value))
                     .Select(pair => pair.Key)
@@ -173,14 +223,14 @@ public static class UserProfileEndpoints
                 }
             }
 
-            var outcome = await userGroupService.SetUserGroupsAsync(id, request.GroupIds);
+            var outcome = await userGroupService.SetUserGroupsAsync(id, requestedGroupIds);
             switch (outcome)
             {
                 case SetUserGroupsOutcome.LockedGroupNotAssignable:
                     return Results.Json(new ApiResponse(ResultCodes.UserGroupLockedGroupNotAssignable, "受保护权限组不可分配"), statusCode: 403);
 
                 case SetUserGroupsOutcome.InvalidGroup:
-                    return Results.BadRequest(new ApiResponse(ResultCodes.Error, "设置失败，请检查权限组ID是否有效"));
+                    return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupNotFound, "用户组不存在"));
 
                 default:
                     return Results.Ok(new ApiResponse(ResultCodes.Success, "设置成功"));
@@ -211,6 +261,7 @@ public static class UserProfileEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
 
             var isSelf = httpContext.User.IsOwnResource(id);
+            var wasDeleted = user.Status == UserStatus.Deleted;
 
             // 与当前状态相同视为"未变更"：界面回传当前值时不应触发管理员限制
             var statusChange = request.Status.HasValue && request.Status.Value != (int)user.Status
@@ -220,14 +271,20 @@ public static class UserProfileEndpoints
             var statusResult = ValidateUserStatusForUpdate(user, statusChange, isSelf);
             if (statusResult != null) return statusResult;
 
-            // 检查用户名唯一性（排除已软删除用户）
+            // 用户名：统一校验（长度/控制字符）+ 唯一性检查（排除已软删除用户）
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
             {
-                if (await userService.ActiveUsernameExistsAsync(request.Username))
+                var usernameError = UserValidation.ValidateUsername(request.Username, out var username);
+                if (usernameError != null)
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, usernameError));
+                }
+
+                if (await userService.ActiveUsernameExistsAsync(username))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名已存在"));
                 }
-                user.Username = request.Username;
+                user.Username = username;
             }
 
             // 只有管理员（拥有 user:update 权限操作他人时）可以修改他人邮箱
@@ -237,21 +294,34 @@ public static class UserProfileEndpoints
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_Forbidden, "请使用修改邮箱接口变更邮箱"));
                 }
-                if (await userService.ActiveEmailExistsAsync(request.Email))
+
+                var emailError = UserValidation.ValidateEmail(request.Email, out var email);
+                if (emailError != null)
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, emailError));
+                }
+
+                if (await userService.ActiveEmailExistsAsync(email))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_EmailExists, "邮箱已被使用"));
                 }
-                user.Email = request.Email;
+                user.Email = email;
                 user.EmailVerifiedAt = null;
             }
 
             if (request.Phone != null)
             {
-                if (await userService.ActivePhoneExistsAsync(request.Phone, id))
+                var phoneError = UserValidation.ValidatePhone(request.Phone, out var phone);
+                if (phoneError != null)
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, phoneError));
+                }
+
+                if (phone != null && await userService.ActivePhoneExistsAsync(phone, id))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_PhoneExists, "手机号已被使用"));
                 }
-                user.Phone = request.Phone;
+                user.Phone = phone;
             }
 
             if (request.Extras.HasValue)
@@ -275,7 +345,28 @@ public static class UserProfileEndpoints
                 user.Status = newStatus;
             }
 
-            await userService.UpdateUserAsync(user);
+            // 软删除用户恢复时，若用户名/邮箱已被新用户占用，返回明确业务码而非数据库唯一键 500
+            if (wasDeleted && statusChange is { } restoreStatus && (UserStatus)restoreStatus != UserStatus.Deleted)
+            {
+                if (await userService.ActiveUsernameExistsAsync(user.Username))
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名已被其他用户使用，无法恢复"));
+                }
+                if (await userService.ActiveEmailExistsAsync(user.Email))
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_EmailExists, "邮箱已被其他用户使用，无法恢复"));
+                }
+            }
+
+            try
+            {
+                await userService.UpdateUserAsync(user);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is MySqlConnector.MySqlException mysqlEx
+                                               && mysqlEx.ErrorCode == MySqlConnector.MySqlErrorCode.DuplicateKeyEntry)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名、邮箱或手机号已被使用"));
+            }
 
             // 封禁/注销时立刻踢掉所有设备上的会话，避免已登录用户继续访问
             await RevokeSessionsForStatusAsync(sessionService, id, statusChange);
@@ -307,6 +398,7 @@ public static class UserProfileEndpoints
                 return Results.NotFound(new ApiResponse(ResultCodes.UpdateUserFail_NotFound, "用户不存在"));
 
             var isSelf = httpContext.User.IsOwnResource(id);
+            var wasDeleted = user.Status == UserStatus.Deleted;
 
             // 与当前状态相同视为"未变更"：界面回传当前值时不应触发管理员限制
             var statusChange = request.Status.HasValue && request.Status.Value != (int)user.Status
@@ -318,20 +410,32 @@ public static class UserProfileEndpoints
 
             if (!string.IsNullOrEmpty(request.Username) && request.Username != user.Username)
             {
-                if (await userService.ActiveUsernameExistsAsync(request.Username))
+                var usernameError = UserValidation.ValidateUsername(request.Username, out var username);
+                if (usernameError != null)
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, usernameError));
+                }
+
+                if (await userService.ActiveUsernameExistsAsync(username))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名已存在"));
                 }
-                user.Username = request.Username;
+                user.Username = username;
             }
 
             if (request.Phone != null)
             {
-                if (await userService.ActivePhoneExistsAsync(request.Phone, id))
+                var phoneError = UserValidation.ValidatePhone(request.Phone, out var phone);
+                if (phoneError != null)
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, phoneError));
+                }
+
+                if (phone != null && await userService.ActivePhoneExistsAsync(phone, id))
                 {
                     return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_PhoneExists, "手机号已被使用"));
                 }
-                user.Phone = request.Phone;
+                user.Phone = phone;
             }
 
             if (request.Extras.HasValue)
@@ -355,7 +459,28 @@ public static class UserProfileEndpoints
                 user.Status = newStatus;
             }
 
-            await userService.UpdateUserAsync(user);
+            // 软删除用户恢复时，若用户名/邮箱已被新用户占用，返回明确业务码而非数据库唯一键 500
+            if (wasDeleted && statusChange is { } restoreStatus && (UserStatus)restoreStatus != UserStatus.Deleted)
+            {
+                if (await userService.ActiveUsernameExistsAsync(user.Username))
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名已被其他用户使用，无法恢复"));
+                }
+                if (await userService.ActiveEmailExistsAsync(user.Email))
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_EmailExists, "邮箱已被其他用户使用，无法恢复"));
+                }
+            }
+
+            try
+            {
+                await userService.UpdateUserAsync(user);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is MySqlConnector.MySqlException mysqlEx
+                                               && mysqlEx.ErrorCode == MySqlConnector.MySqlErrorCode.DuplicateKeyEntry)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名、邮箱或手机号已被使用"));
+            }
 
             // 封禁/注销时立刻踢掉所有设备上的会话
             await RevokeSessionsForStatusAsync(sessionService, id, statusChange);
@@ -455,9 +580,16 @@ public static class UserProfileEndpoints
             var statusResult = ValidateUserStatus(user);
             if (statusResult != null) return statusResult;
 
-            if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash))
+            if (!PasswordHasher.Verify(request.CurrentPassword, user.PasswordHash))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangePasswordFail_WrongCurrent, "当前密码错误"));
+            }
+
+            // 新密码长度/格式校验：与注册、管理员重置保持同一规则（8-128）
+            var passwordError = UserValidation.ValidatePassword(request.NewPassword);
+            if (passwordError != null)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, passwordError));
             }
 
             if (request.NewPassword == request.CurrentPassword)
@@ -465,14 +597,14 @@ public static class UserProfileEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangePasswordFail_SamePassword, "新密码不能与当前密码相同"));
             }
 
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword, 12);
+            user.PasswordHash = PasswordHasher.Hash(request.NewPassword!);
             await userService.UpdateUserAsync(user);
 
             // 改密后所有设备都必须重新登录（含当前设备）
             await sessionService.RevokeAllAsync(id, SessionRevokeReasons.PasswordChanged);
 
             // 撤销当前 Access Token，强制重新登录
-            var jti = httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+            var jti = httpContext.User.GetJti();
             if (jti != null)
             {
                 await tokenBlacklistService.BlacklistAsync(jti, DateTime.UtcNow.AddMinutes(appConfig.Jwt.ExpiryMinutes));
@@ -509,23 +641,30 @@ public static class UserProfileEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_SameEmail, "新邮箱与旧邮箱相同"));
             }
 
-            if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+            // 新邮箱格式/长度校验，避免把非法值写入待验证 token 并触发数据库异常
+            var emailError = UserValidation.ValidateEmail(request.NewEmail, out var newEmail);
+            if (emailError != null)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, emailError));
+            }
+
+            if (!PasswordHasher.Verify(request.Password, user.PasswordHash))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_WrongPassword, "密码错误"));
             }
 
-            if (await userService.ActiveEmailExistsAsync(request.NewEmail))
+            if (await userService.ActiveEmailExistsAsync(newEmail))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_EmailExists, "该邮箱已被使用"));
             }
 
             var token = await tokenService.CreateVerificationTokenAsync(
-                id, VerificationTokenType.EmailChange, request.NewEmail);
+                id, VerificationTokenType.EmailChange, newEmail);
 
             try
             {
                 await emailService.SendVerificationEmailAsync(
-                    request.NewEmail, user.Username, token.Token, true, request.NewEmail);
+                    newEmail, user.Username, token.Token, true, newEmail);
             }
             catch (Exception ex)
             {

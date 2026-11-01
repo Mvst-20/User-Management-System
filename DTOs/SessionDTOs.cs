@@ -12,6 +12,13 @@ public static class LoginLogEvents
 
     /// <summary>风险登录提醒已发送（同时作为提醒去重依据）。</summary>
     public const string Alert = "alert";
+
+    /// <summary>
+    /// 允许客户端用于登录历史筛选的事件类型。
+    /// <c>alert</c> 属于内部提醒记录，不对外暴露，也不接受作为筛选值。
+    /// </summary>
+    public static readonly IReadOnlySet<string> VisibleEventTypes =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Login, Refresh, Logout, Revoked };
 }
 
 /// <summary>会话撤销原因。</summary>
@@ -48,7 +55,10 @@ public record SessionResponse(
     string? UserAgent,
     DateTime CreatedAt,
     DateTime LastActiveAt,
-    bool IsCurrent);
+    bool IsCurrent,
+
+    /// <summary>该会话当前是否有效；列表接口只返回有效会话，因此恒为 true。</summary>
+    bool IsActive = true);
 
 public record SessionListResponse(IReadOnlyList<SessionResponse> Items, int Total);
 
@@ -61,6 +71,7 @@ public record LoginLogResponse(
     string? Ip,
     string? Location,
     string? DeviceName,
+    string? UserAgent,
     DateTime CreatedAt);
 
 public record LoginHistoryResponse(

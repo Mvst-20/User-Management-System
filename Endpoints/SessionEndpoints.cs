@@ -29,7 +29,7 @@ public static class SessionEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "未登录"), statusCode: 401);
             }
 
-            var currentSessionId = httpContext.User.FindFirst(JwtClaimNames.SessionId)?.Value;
+            var currentSessionId = httpContext.User.GetSessionId();
             var items = await sessionService.GetSessionsAsync(userId.Value, currentSessionId);
 
             return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功",
@@ -68,7 +68,7 @@ public static class SessionEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "未登录"), statusCode: 401);
             }
 
-            var currentSessionId = httpContext.User.FindFirst(JwtClaimNames.SessionId)?.Value;
+            var currentSessionId = httpContext.User.GetSessionId();
             var count = await sessionService.RevokeAllExceptAsync(
                 userId.Value, currentSessionId, SessionRevokeReasons.LogoutAll);
 
@@ -92,9 +92,19 @@ public static class SessionEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "未登录"), statusCode: 401);
             }
 
+            // eventType 白名单校验：alert 属于内部提醒记录，不对外暴露；
+            // 非法值返回参数错误，而不是 200 + 空列表。
+            if (!string.IsNullOrWhiteSpace(eventType))
+            {
+                eventType = eventType.Trim().ToLowerInvariant();
+                if (!LoginLogEvents.VisibleEventTypes.Contains(eventType))
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "eventType 参数无效"));
+                }
+            }
+
             var history = await sessionService.GetLoginHistoryAsync(userId.Value, page, pageSize, success, eventType);
-            return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", history));
-        }).RequireAuthorization().RequirePermission(PermissionCodes.LoginHistoryRead);
+            return Results.Ok(new ApiResponse(ResultCodes.Success, "获取成功", history));        }).RequireAuthorization().RequirePermission(PermissionCodes.LoginHistoryRead);
 
         // ============ 管理员：查看/踢出指定用户的设备 ============
 

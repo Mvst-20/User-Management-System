@@ -569,18 +569,15 @@ namespace UserManagementSystem.Migrations
 
                     b.HasIndex("CreatedAt");
 
-                    b.HasIndex("Email")
-                        .IsUnique();
+                    b.HasIndex("Email");
 
                     b.HasIndex("LastLoginAt");
 
-                    b.HasIndex("Phone")
-                        .IsUnique();
+                    b.HasIndex("Phone");
 
                     b.HasIndex("Status");
 
-                    b.HasIndex("Username")
-                        .IsUnique();
+                    b.HasIndex("Username");
 
                     b.ToTable("users");
                 });

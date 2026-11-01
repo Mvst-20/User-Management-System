@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using UserManagementSystem.Configuration;
 using UserManagementSystem.Data;
 using UserManagementSystem.DTOs;
+using UserManagementSystem.Exceptions;
 using UserManagementSystem.Extensions;
 using UserManagementSystem.Logging;
 using UserManagementSystem.Models;
@@ -156,22 +157,29 @@ public static class AdminEndpoints
         // 服务器状态（C 权限覆盖，或 admin:server 权限）
         app.MapGet("/api/admin/server/status", async (
             [FromServices] IServiceProvider serviceProvider,
-            [FromServices] ISystemMonitorService monitorService) =>
+            [FromServices] ISystemMonitorService monitorService,
+            [FromServices] ILogger<Program> logger,
+            HttpContext httpContext) =>
         {
             // 获取系统级监控数据
             var status = monitorService.GetSystemStatus();
 
             string dbStatus;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(httpContext.RequestAborted);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+
             try
             {
                 using var scope = serviceProvider.CreateScope();
                 var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-                await context.Database.ExecuteSqlRawAsync("SELECT 1");
+                await context.Database.ExecuteSqlRawAsync("SELECT 1", cts.Token);
                 dbStatus = "Connected";
             }
             catch (Exception ex)
             {
-                dbStatus = $"Error: {ex.Message}";
+                // 降级为 200 + databaseStatus=Error，且不回显异常原文（可能含连接细节）
+                logger.LogWarning(ex, "[SERVER-STATUS] 数据库探针失败，返回降级状态");
+                dbStatus = "Error: 数据库不可用";
             }
 
             var response = new ServerStatusResponse(
@@ -218,6 +226,12 @@ public static class AdminEndpoints
                 await emailService.SendEmailAsync(request.To, request.Subject, $"<pre>{WebUtility.HtmlEncode(request.Body)}</pre>");
                 return Results.Ok(new ApiResponse(ResultCodes.EmailSendSuccess, "邮件发送成功"));
             }
+            catch (BusinessException ex)
+            {
+                // 透传“邮件服务未配置或已停用”等明确提示，与 /api/admin/smtp/test 口径一致
+                logger.LogWarning(ex, "Failed to send test email to {To}", request.To);
+                return Results.BadRequest(new ApiResponse(ex.Code, ex.Message));
+            }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to send test email to {To}", request.To);
@@ -262,12 +276,16 @@ public static class AdminEndpoints
                 generatedPassword = PasswordGenerator.Generate(appConfig.AppSettings.AdminPasswordLength);
                 newPassword = generatedPassword;
             }
-            else if (newPassword.Length is < 8 or > 128)
+            else
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "密码长度需为 8-128 个字符"));
+                var passwordError = UserValidation.ValidatePassword(newPassword);
+                if (passwordError != null)
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, passwordError));
+                }
             }
 
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword, 12);
+            user.PasswordHash = PasswordHasher.Hash(newPassword!);
             await userService.UpdateUserAsync(user);
 
             // 强制目标用户重新登录：撤销其全部会话（所有设备）
@@ -295,17 +313,23 @@ public static class AdminEndpoints
                 return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "未授权"), statusCode: 401);
             }
 
-            var username = request.Username?.Trim();
-            var email = request.Email?.Trim();
-
-            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(email))
+            // 与管理端/注册端使用同一套校验规则，避免超长值触发数据库异常返回 500
+            var usernameError = UserValidation.ValidateUsername(request.Username, out var username);
+            if (usernameError != null)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "用户名与邮箱为必填项"));
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, usernameError));
             }
 
-            if (username.Length is < 3 or > 64)
+            var emailError = UserValidation.ValidateEmail(request.Email, out var email);
+            if (emailError != null)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "用户名长度需为 3-64 个字符"));
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, emailError));
+            }
+
+            var phoneError = UserValidation.ValidatePhone(request.Phone, out var phone);
+            if (phoneError != null)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, phoneError));
             }
 
             if (await userService.ActiveUsernameExistsAsync(username))
@@ -318,10 +342,25 @@ public static class AdminEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_EmailExists, "邮箱已被使用"));
             }
 
-            // 与"权限组分配"端点同一规则：只能分配级别严格低于自己的权限组
+            // 与"权限组分配"端点同一规则：只能分配级别严格低于自己的权限组；
+            // 成员锁定的受保护组（初始用户组）不可分配。
             var actorLevel = await userGroupService.GetUserPrivilegeLevelAsync(actorId.Value);
             if (request.GroupIds is { Count: > 0 })
             {
+                foreach (var groupId in request.GroupIds)
+                {
+                    var group = await userGroupService.GetGroupByIdAsync(groupId);
+                    if (group == null)
+                    {
+                        return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupNotFound, "用户组不存在"));
+                    }
+                    if (group.IsMemberLocked)
+                    {
+                        return Results.Json(new ApiResponse(ResultCodes.UserGroupLockedGroupNotAssignable, "受保护权限组不可分配"),
+                            statusCode: 403);
+                    }
+                }
+
                 var levels = await userGroupService.GetGroupLevelsAsync(request.GroupIds);
                 var illegal = levels
                     .Where(pair => !PrivilegeLevelExtensions.CanManageGroup(actorLevel, pair.Value))
@@ -339,29 +378,42 @@ public static class AdminEndpoints
             var generated = string.IsNullOrWhiteSpace(request.Password);
             var password = generated
                 ? PasswordGenerator.Generate(appConfig.AppSettings.AdminPasswordLength)
-                : request.Password!.Trim();
+                : request.Password!;
 
-            if (password.Length is < 8 or > 128)
+            var passwordError = UserValidation.ValidatePassword(password);
+            if (passwordError != null)
             {
-                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "密码长度需为 8-128 个字符"));
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, passwordError));
             }
 
             var user = new User
             {
                 Username = username,
                 Email = email,
-                Phone = string.IsNullOrWhiteSpace(request.Phone) ? null : request.Phone.Trim(),
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(password, 12),
+                Phone = phone,
+                PasswordHash = PasswordHasher.Hash(password),
                 Status = request.RequireEmailVerification ? UserStatus.Unverified : UserStatus.Normal,
                 EmailVerifiedAt = request.RequireEmailVerification ? null : DateTime.UtcNow,
                 CreatedAt = DateTime.UtcNow
             };
 
-            await userService.CreateUserAsync(user);
+            try
+            {
+                await userService.CreateUserAsync(user);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is MySqlConnector.MySqlException mysqlEx
+                                               && mysqlEx.ErrorCode == MySqlConnector.MySqlErrorCode.DuplicateKeyEntry)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.UpdateUserFail_UsernameExists, "用户名或邮箱已被使用"));
+            }
 
             if (request.GroupIds is { Count: > 0 })
             {
-                await userGroupService.SetUserGroupsAsync(user.Id, request.GroupIds);
+                var outcome = await userGroupService.SetUserGroupsAsync(user.Id, request.GroupIds);
+                if (outcome != SetUserGroupsOutcome.Success)
+                {
+                    return Results.BadRequest(new ApiResponse(ResultCodes.UserGroupNotFound, "用户组设置失败，请检查权限组 ID"));
+                }
             }
 
             logger.LogInformation("[CREATE-USER] User {UserId} created by administrator {ActorId}",
@@ -419,21 +471,19 @@ public static class AdminEndpoints
 
         // 运行日志（内存环形缓冲增量拉取，供「运行日志」页面；历史日志见 logs/ 目录文件）
         app.MapGet("/api/admin/logs", (
-            [FromQuery] long afterId,
-            [FromQuery] string? level,
-            [FromQuery] int limit) =>
+            [FromQuery] long afterId = 0,
+            [FromQuery] string? level = null,
+            [FromQuery] int? limit = null) =>
         {
-            if (limit is < 10 or > 1000)
-            {
-                limit = 300;
-            }
+            // limit 缺省/越界统一收敛为 300（不再因缺少参数触发模型绑定 400）
+            var effectiveLimit = limit is >= 10 and <= 1000 ? limit.Value : 300;
 
             var entries = MemoryLogSink.Instance.ReadAfter(afterId, level);
 
             // 首次拉取（afterId=0）取缓冲区尾部，避免一次灌入全量 2000 条
             var slice = afterId == 0
-                ? entries.TakeLast(limit).ToList()
-                : entries.Take(limit).ToList();
+                ? entries.TakeLast(effectiveLimit).ToList()
+                : entries.Take(effectiveLimit).ToList();
 
             var items = slice.Select(entry => new RuntimeLogEntry(
                 entry.Sequence,

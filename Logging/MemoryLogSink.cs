@@ -32,12 +32,13 @@ public sealed class MemoryLogSink : ILogEventSink
 
     public void Emit(LogEvent logEvent)
     {
+        // 纵深防御：即使某处误用 ILogger 打印了口令/密钥，运行日志页与内存缓冲也不出现明文
         var entry = new MemoryLogEntry(
             Interlocked.Increment(ref _sequence),
             logEvent.Timestamp.LocalDateTime,
             logEvent.Level.ToString(),
-            logEvent.RenderMessage(),
-            logEvent.Exception?.ToString());
+            SecretRedactor.Redact(logEvent.RenderMessage()),
+            SecretRedactor.Redact(logEvent.Exception?.ToString()));
 
         lock (_lock)
         {

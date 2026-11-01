@@ -1,3 +1,4 @@
+using System.Net;
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using MimeKit;
@@ -88,18 +89,24 @@ public class EmailService : IEmailService
 
         var expiryMinutes = _config.AppSettings.TokenExpiryMinutes;
 
+        // 用户可控数据（用户名、新邮箱）必须转义后再拼入 HTML 正文，
+        // 否则邮件客户端会把用户名中的标签当作邮件正文解析（与登录提醒邮件保持一致）。
+        var safeUsername = WebUtility.HtmlEncode(username);
+        var safeToken = Uri.EscapeDataString(token);
+
         if (isEmailChange && !string.IsNullOrEmpty(newEmail))
         {
             subject = "Confirm Email Change";
-            var verifyUrl = $"{_config.AppSettings.ApiBaseUrl}/api/users/verify-email-change?token={token}";
+            var safeNewEmail = WebUtility.HtmlEncode(newEmail);
+            var verifyUrl = $"{_config.AppSettings.ApiBaseUrl}/api/users/verify-email-change?token={safeToken}";
 
             htmlBody = $@"<!DOCTYPE html>
 <html><head><meta charset=""utf-8""></head>
 <body style=""font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;"">
 <div style=""max-width:600px;margin:0 auto;background:#fff;padding:30px;border-radius:8px;"">
 <h2 style=""color:#333;margin:0 0 20px;"">Confirm Email Change</h2>
-<p>Hello {username},</p>
-<p>You are requesting to change your email to: <strong>{newEmail}</strong></p>
+<p>Hello {safeUsername},</p>
+<p>You are requesting to change your email to: <strong>{safeNewEmail}</strong></p>
 <p><a href=""{verifyUrl}"" style=""display:inline-block;background:#7b1fa2;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;"">Confirm Change</a></p>
 <p style=""color:#666;font-size:14px;"">Or copy this link: {verifyUrl}</p>
 <p style=""color:#666;font-size:13px;"">This link expires in {expiryMinutes} minutes.</p>
@@ -109,14 +116,14 @@ public class EmailService : IEmailService
         else
         {
             subject = "Email Verification";
-            var verifyUrl = $"{_config.AppSettings.ApiBaseUrl}/api/users/verify-email?token={token}";
+            var verifyUrl = $"{_config.AppSettings.ApiBaseUrl}/api/users/verify-email?token={safeToken}";
 
             htmlBody = $@"<!DOCTYPE html>
 <html><head><meta charset=""utf-8""></head>
 <body style=""font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;"">
 <div style=""max-width:600px;margin:0 auto;background:#fff;padding:30px;border-radius:8px;"">
 <h2 style=""color:#333;margin:0 0 20px;"">Verify Your Email</h2>
-<p>Hello {username},</p>
+<p>Hello {safeUsername},</p>
 <p>Thank you for registering. Click the button below to verify your email address (expires in {expiryMinutes} minutes).</p>
 <p><a href=""{verifyUrl}"" style=""display:inline-block;background:#1976d2;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;"">Verify Email</a></p>
 <p style=""color:#666;font-size:14px;"">Or copy this link: {verifyUrl}</p>

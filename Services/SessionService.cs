@@ -45,12 +45,43 @@ public class SessionService : ISessionService
         var token = GenerateToken();
         var tokenHash = HashToken(token);
 
-        // 同类设备只保留最近一次登录：同 device_key 的旧会话直接失效
-        var replaced = await _context.UserSessions
+        // 同类设备只保留最近一次登录：同 device_key 的旧会话直接失效。
+        // 采用「单条批量 UPDATE + 批量审计插入」，避免每个并发登录都产生多条撤销写操作；
+        // 审计事件与新会话在同一次 SaveChanges 中提交。
+        var replacedSessions = await _context.UserSessions
+            .AsNoTracking()
             .Where(s => s.UserId == user.Id && s.DeviceKey == device.Key && s.RevokedAt == null)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.RevokedAt, now)
-                .SetProperty(x => x.RevokedReason, SessionRevokeReasons.ReplacedByNewDevice), ct);
+            .ToListAsync(ct);
+
+        if (replacedSessions.Count > 0)
+        {
+            await _context.UserSessions
+                .Where(s => s.UserId == user.Id && s.DeviceKey == device.Key && s.RevokedAt == null)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(x => x.RevokedAt, now)
+                    .SetProperty(x => x.RevokedReason, SessionRevokeReasons.ReplacedByNewDevice), ct);
+
+            foreach (var oldSession in replacedSessions)
+            {
+                _cache.Remove(ActiveCacheKey(oldSession.Id));
+                _context.LoginLogs.Add(new LoginLog
+                {
+                    UserId = user.Id,
+                    EventType = LoginLogEvents.Revoked,
+                    Success = true,
+                    FailReason = SessionRevokeReasons.ReplacedByNewDevice,
+                    Ip = oldSession.LastIp ?? oldSession.Ip,
+                    Location = oldSession.Location,
+                    UserAgent = oldSession.UserAgent,
+                    DeviceName = oldSession.DeviceName,
+                    SessionId = oldSession.Id,
+                    CreatedAt = now
+                });
+            }
+
+            // 不额外拉黑旧 jti：旧令牌带 sid，会话撤销后由 IsSessionActiveAsync 在
+            // SessionValidationCacheSeconds（默认 5s）内拒绝；并发登录时也避免 revoked_tokens 热点写。
+        }
 
         var session = new UserSession
         {
@@ -71,11 +102,11 @@ public class SessionService : ISessionService
         _context.UserSessions.Add(session);
         await _context.SaveChangesAsync(ct);
 
-        if (replaced > 0)
+        if (replacedSessions.Count > 0)
         {
             _logger.LogInformation(
                 "用户 {UserId} 的同类设备会话被新登录顶替：{Count} 个（设备 {Device}）",
-                user.Id, replaced, device.Name);
+                user.Id, replacedSessions.Count, device.Name);
         }
 
         return new SessionIssueResult(user, session, token);
@@ -308,7 +339,8 @@ public class SessionService : ISessionService
                 s.UserAgent,
                 s.CreatedAt,
                 s.LastActiveAt,
-                s.Id == currentSessionId))
+                s.Id == currentSessionId,
+                true))
             .ToListAsync(ct);
     }
 
@@ -364,6 +396,7 @@ public class SessionService : ISessionService
                 l.Ip,
                 l.Location,
                 l.DeviceName,
+                l.UserAgent,
                 l.CreatedAt))
             .ToListAsync(ct);
 

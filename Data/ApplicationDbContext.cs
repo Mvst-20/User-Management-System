@@ -33,9 +33,12 @@ public class ApplicationDbContext : DbContext
 
         modelBuilder.Entity<User>(entity =>
         {
-            entity.HasIndex(e => e.Username).IsUnique();
-            entity.HasIndex(e => e.Email).IsUnique();
-            entity.HasIndex(e => e.Phone).IsUnique();
+            // 唯一性由数据库层的“软删除感知唯一索引”保证（迁移 AddSoftDeleteAwareUniqueIndexes）：
+            // users.username/email/phone 的生成列在 status=4 时为 NULL，唯一索引因此不占用软删除记录。
+            // EF 模型只声明普通索引用于查询，避免 Pomelo 对计算列映射的兼容性依赖。
+            entity.HasIndex(e => e.Username);
+            entity.HasIndex(e => e.Email);
+            entity.HasIndex(e => e.Phone);
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.LastLoginAt);
             entity.HasIndex(e => e.CreatedAt);

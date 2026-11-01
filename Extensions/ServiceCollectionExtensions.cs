@@ -37,8 +37,17 @@ public static class ServiceCollectionExtensions
         builder.Configuration.GetSection("Permissions").Bind(appConfig.Permissions);
         builder.Configuration.GetSection("Security").Bind(appConfig.Security);
 
-        if (string.IsNullOrWhiteSpace(appConfig.Jwt.Key) || appConfig.Jwt.Key.Length < 64)
-            throw new InvalidOperationException("JWT Key must be at least 64 characters.");
+        if (string.IsNullOrWhiteSpace(appConfig.Jwt.Issuer) || string.IsNullOrWhiteSpace(appConfig.Jwt.Audience))
+            throw new InvalidOperationException("Jwt:Issuer 与 Jwt:Audience 必须配置。");
+
+        // 签名密钥绝不入库：优先外部注入（Jwt__Key），缺失时按配置决定“启动失败”或“生成到 keys/”。
+        // 注意：密钥一旦轮换，所有已签发的 Access Token 立即失效。
+        var keysDirectory = ResolveKeysDirectory(builder, appConfig);
+        appConfig.Jwt.Key = JwtKeyProvider.Resolve(appConfig.Jwt, keysDirectory, out var keyWarning);
+        if (!string.IsNullOrWhiteSpace(keyWarning))
+        {
+            Serilog.Log.Warning("{Warning}", keyWarning);
+        }
 
         // 注意：SMTP 配置完全由数据库维护（管理后台「邮件服务」页面），
         // 配置文件中已不再包含 Smtp 段落，因此此处不做任何校验与导入。
@@ -48,6 +57,17 @@ public static class ServiceCollectionExtensions
         return appConfig;
     }
 
+    /// <summary>解析 Data Protection / 本地 JWT 密钥目录（相对路径基于内容根目录）。</summary>
+    private static string ResolveKeysDirectory(WebApplicationBuilder builder, AppConfiguration appConfig)
+    {
+        var configured = appConfig.AppSettings.DataProtectionKeysPath;
+        return string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(builder.Environment.ContentRootPath, "keys")
+            : Path.IsPathRooted(configured)
+                ? configured
+                : Path.Combine(builder.Environment.ContentRootPath, configured);
+    }
+
     /// <summary>
     /// 注册 Data Protection 并将密钥环持久化到磁盘目录。
     /// SMTP 密码以该密钥环加密存储：若密钥环丢失（未持久化、容器重建等），
@@ -55,12 +75,7 @@ public static class ServiceCollectionExtensions
     /// </summary>
     private static void AddAppDataProtection(WebApplicationBuilder builder, AppConfiguration appConfig)
     {
-        var configured = appConfig.AppSettings.DataProtectionKeysPath;
-        var keysPath = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(builder.Environment.ContentRootPath, "keys")
-            : Path.IsPathRooted(configured)
-                ? configured
-                : Path.Combine(builder.Environment.ContentRootPath, configured);
+        var keysPath = ResolveKeysDirectory(builder, appConfig);
 
         Directory.CreateDirectory(keysPath);
 
@@ -89,6 +104,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<PermissionState>();
         // 页面标题/操作区提升到顶栏的桥接状态（PageContainer 写、TopBar 读）
         services.AddScoped<UserManagementSystem.Components.Shared.PageHeaderService>();
+        // 站点名称的跨组件同步状态（系统设置保存后，左侧品牌标题即时刷新）
+        services.AddScoped<UserManagementSystem.Components.Shared.SiteInfoState>();
         // 覆盖默认提供者：认证状态来自 TokenStore（JWT），而非 Cookie
         services.AddScoped<AuthenticationStateProvider, JwtAuthenticationStateProvider>();
 
@@ -124,9 +141,12 @@ public static class ServiceCollectionExtensions
             // 固定 MySqlServerVersion：避免 AutoDetect 在启动/设计时额外发起探测连接
             options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 21)), mySqlOptions =>
             {
+                // 瞬时故障重试：保留 3 次重试，但把最大退避从 10s 降到 2s。
+                // 数据库整体不可用时，鉴权链路的降级路径可在数秒内触发，
+                // 而不是把监控/诊断请求拖到 30s 以上（DEF-024）。
                 mySqlOptions.EnableRetryOnFailure(
                     maxRetryCount: 3,
-                    maxRetryDelay: TimeSpan.FromSeconds(10),
+                    maxRetryDelay: TimeSpan.FromSeconds(2),
                     errorNumbersToAdd: null);
             });
             if (builder.Environment.IsDevelopment())
@@ -199,63 +219,94 @@ public static class ServiceCollectionExtensions
             {
                 OnTokenValidated = async context =>
                 {
-                    var jti = context.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
-                    if (jti != null)
-                    {
-                        var blacklistService = context.HttpContext.RequestServices.GetRequiredService<ITokenBlacklistService>();
-                        if (await blacklistService.IsBlacklistedAsync(jti))
-                        {
-                            context.Fail("Token has been revoked");
-                            return;
-                        }
-                    }
+                    // 数据库校验的短超时：数据库不可用时快速降级，避免每个请求被连接超时拖住数十秒。
+                    using var dbCheckCts = CancellationTokenSource.CreateLinkedTokenSource(context.HttpContext.RequestAborted);
+                    dbCheckCts.CancelAfter(TimeSpan.FromSeconds(3));
+                    var dbCt = dbCheckCts.Token;
 
-                    // 会话校验：JWT 中的 sid 指向 user_sessions。
-                    // 撤销会话（踢下线、被新设备顶替、封禁）后，最迟 SessionValidationCacheSeconds
-                    // 内所有实例都会拒绝该 token。旧版本令牌（无 sid）放行，兼容 ≤ExpiryMinutes 的过渡窗口。
-                    var sessionId = context.Principal?.FindFirst(JwtClaimNames.SessionId)?.Value;
-                    if (!string.IsNullOrEmpty(sessionId))
+                    try
                     {
-                        var sessionService = context.HttpContext.RequestServices.GetRequiredService<ISessionService>();
-                        if (!await sessionService.IsSessionActiveAsync(sessionId))
+                        var principal = context.Principal;
+                        if (principal is null)
                         {
-                            context.Fail("Session has been revoked");
+                            context.Fail("Invalid token");
                             return;
                         }
 
-                        // 活跃时间节流上报（同会话 1 分钟内只写一次），供「已登录客户端」排序与在线统计
-                        await sessionService.TouchAsync(
-                            sessionId,
-                            context.HttpContext.Connection.RemoteIpAddress?.ToString());
-                    }
-
-                    var userIdClaim = context.Principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-                    if (userIdClaim != null && ulong.TryParse(userIdClaim, out var userId))
-                    {
-                        // 用户状态缓存 30s，避免每个请求都查询 users 表；
-                        // 键内嵌 user_status 版本号：状态变更（封禁/解封/删除）时版本号递增，
-                        // 所有实例的旧键立即失效，不再有 30 秒的滞后窗口。
-                        var cache = context.HttpContext.RequestServices.GetRequiredService<IMemoryCache>();
-                        var versionService = context.HttpContext.RequestServices.GetRequiredService<ICacheVersionService>();
-                        var statusVersion = await versionService.GetVersionAsync(CacheScopes.UserStatus);
-                        var cacheKey = UserService.UserStatusCacheKey(statusVersion, userId);
-                        if (!cache.TryGetValue(cacheKey, out UserStatus status))
+                        var jti = principal.GetJti();
+                        if (jti != null)
                         {
-                            var userService = context.HttpContext.RequestServices.GetRequiredService<IUserService>();
-                            var user = await userService.GetByIdAsync(userId);
-                            if (user == null)
+                            var blacklistService = context.HttpContext.RequestServices.GetRequiredService<ITokenBlacklistService>();
+                            if (await blacklistService.IsBlacklistedAsync(jti, dbCt))
                             {
-                                context.Fail("User account is not active");
+                                context.Fail("Token has been revoked");
                                 return;
                             }
-                            status = user.Status;
-                            cache.Set(cacheKey, status, TimeSpan.FromSeconds(30));
                         }
 
-                        if (status == UserStatus.Deleted || status == UserStatus.Banned)
+                        // 会话校验：JWT 中的 sid 指向 user_sessions。
+                        // 撤销会话（踢下线、被新设备顶替、封禁）后，最迟 SessionValidationCacheSeconds
+                        // 内所有实例都会拒绝该 token。旧版本令牌（无 sid）放行，兼容 ≤ExpiryMinutes 的过渡窗口。
+                        var sessionId = principal.GetSessionId();
+                        if (!string.IsNullOrEmpty(sessionId))
                         {
-                            context.Fail("User account is not active");
+                            var sessionService = context.HttpContext.RequestServices.GetRequiredService<ISessionService>();
+                            if (!await sessionService.IsSessionActiveAsync(sessionId, dbCt))
+                            {
+                                context.Fail("Session has been revoked");
+                                return;
+                            }
+
+                            // 活跃时间节流上报（同会话 1 分钟内只写一次），供「已登录客户端」排序与在线统计
+                            await sessionService.TouchAsync(
+                                sessionId,
+                                context.HttpContext.Connection.RemoteIpAddress?.ToString(),
+                                dbCt);
                         }
+
+                        var userId = principal.GetUserId();
+                        if (userId.HasValue)
+                        {
+                            // 用户状态缓存 30s，避免每个请求都查询 users 表；
+                            // 键内嵌 user_status 版本号：状态变更（封禁/解封/删除）时版本号递增，
+                            // 所有实例的旧键立即失效，不再有 30 秒的滞后窗口。
+                            var cache = context.HttpContext.RequestServices.GetRequiredService<IMemoryCache>();
+                            var versionService = context.HttpContext.RequestServices.GetRequiredService<ICacheVersionService>();
+                            var statusVersion = await versionService.GetVersionAsync(CacheScopes.UserStatus, dbCt);
+                            var cacheKey = UserService.UserStatusCacheKey(statusVersion, userId.Value);
+                            if (!cache.TryGetValue(cacheKey, out UserStatus status))
+                            {
+                                var userService = context.HttpContext.RequestServices.GetRequiredService<IUserService>();
+                                var user = await userService.GetByIdAsync(userId.Value, dbCt);
+                                if (user == null)
+                                {
+                                    context.Fail("User account is not active");
+                                    return;
+                                }
+                                status = user.Status;
+                                cache.Set(cacheKey, status, TimeSpan.FromSeconds(30));
+                            }
+
+                            if (status == UserStatus.Deleted || status == UserStatus.Banned)
+                            {
+                                context.Fail("User account is not active");
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) when (!context.HttpContext.RequestAborted.IsCancellationRequested)
+                    {
+                        // 数据库校验超时：按可用性降级放行，签名/有效期仍由 JwtBearer 严格校验
+                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+                        logger.LogWarning("鉴权阶段的数据库校验超时（3s），本次请求已降级为仅校验令牌签名与有效期");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        // 数据库整体不可用（连接中断、重试耗尽）时，监控/诊断端点仍需可达：
+                        // 仅对“数据库校验失败”降级放行，令牌签名、有效期、issuer/audience 仍由
+                        // JwtBearer 严格校验。故障窗口内撤销状态可能滞后，恢复后立即回到严格校验。
+                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+                        logger.LogWarning(ex,
+                            "鉴权阶段的数据库校验失败，本次请求已降级为仅校验令牌签名与有效期");
                     }
                 }
             };

@@ -24,7 +24,7 @@ public static class SerilogConfig
                 outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}",
                 restrictedToMinimumLevel: LogEventLevel.Information)
             .WriteTo.Logger(lc => lc
-                .Filter.ByIncludingOnly(e => e.Properties.ContainsKey("RequestPath"))
+                .Filter.ByIncludingOnly(IsRequestCompletion)
                 .WriteTo.File("logs/access-.log",
                     rollingInterval: RollingInterval.Day,
                     retainedFileCountLimit: 30,
@@ -36,9 +36,20 @@ public static class SerilogConfig
                     retainedFileCountLimit: 90,
                     outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level}] {Message:lj}{NewLine}{Exception}"))
             .WriteTo.Logger(lc => lc
-                .Filter.ByExcluding(e => e.Properties.ContainsKey("RequestPath") || e.Level >= LogEventLevel.Error)
+                .Filter.ByExcluding(e => IsRequestCompletion(e) || e.Level >= LogEventLevel.Error)
                 .WriteTo.File("logs/app-.log",
                     rollingInterval: RollingInterval.Day,
                     retainedFileCountLimit: 30,
                     outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level}] {Message:lj}{NewLine}{Exception}"));
+
+    /// <summary>
+    /// 是否为「HTTP 请求完成」日志（Serilog.AspNetCore 的请求日志专用属性）。
+    /// <para>
+    /// 不能用 <c>RequestPath</c> 分类：ASP.NET Core 宿主会把 RequestPath 带进整个请求作用域，
+    /// 导致请求内所有业务日志都被写进 access 文件、又被 app 文件排除。
+    /// 只有请求完成事件才同时带 StatusCode 与 Elapsed。
+    /// </para>
+    /// </summary>
+    private static bool IsRequestCompletion(LogEvent logEvent)
+        => logEvent.Properties.ContainsKey("StatusCode") && logEvent.Properties.ContainsKey("Elapsed");
 }

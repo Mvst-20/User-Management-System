@@ -40,6 +40,9 @@ public sealed class MetricsCollectorService : BackgroundService
         // 启动即采样一次，避免图表前 1 分钟无数据
         await SampleSafelyAsync(stoppingToken);
 
+        // 启动即清理一次：lastCleanup 若从启动时刻起算，重启后 8 天前的旧数据还要再保留 1 小时
+        await CleanupSafelyAsync(stoppingToken);
+
         using var timer = new PeriodicTimer(SampleInterval);
         var lastCleanup = DateTime.UtcNow;
 

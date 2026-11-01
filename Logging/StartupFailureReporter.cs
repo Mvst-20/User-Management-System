@@ -32,21 +32,21 @@ public static class StartupFailureReporter
         builder.AppendLine($"  时间：      {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         builder.AppendLine($"  工作目录：  {SafeCurrentDirectory()}");
         builder.AppendLine($"  异常类型：  {exception.GetType().FullName}");
-        builder.AppendLine($"  异常信息：  {exception.Message}");
+        builder.AppendLine($"  异常信息：  {SecretRedactor.Redact(exception.Message)}");
 
         if (exception.InnerException is { } inner)
         {
-            builder.AppendLine($"  内部异常：  {inner.GetType().FullName}: {inner.Message}");
+            builder.AppendLine($"  内部异常：  {inner.GetType().FullName}: {SecretRedactor.Redact(inner.Message)}");
         }
 
         if (!string.IsNullOrWhiteSpace(note))
         {
-            builder.AppendLine($"  备注：      {note}");
+            builder.AppendLine($"  备注：      {SecretRedactor.Redact(note)}");
         }
 
         builder.AppendLine();
         builder.AppendLine("  堆栈：");
-        builder.AppendLine(exception.StackTrace ?? "（无）");
+        builder.AppendLine(SecretRedactor.Redact(exception.StackTrace) is { Length: > 0 } stack ? stack : "（无）");
         builder.AppendLine("──────────────────────────────────────────────────────────────");
         return builder.ToString();
     }

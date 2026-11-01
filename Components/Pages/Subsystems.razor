@@ -82,7 +82,7 @@
                                             <UiIcon Name="pencil" Size="14" />
                                             <span>编辑</span>
                                         </MenuItem>
-                                        <MenuItem Key="toggle" OnClick="@(() => ToggleStatusAsync(context))">
+                                        <MenuItem Key="toggle" OnClick="@(() => ConfirmToggleStatusAsync(context))">
                                             <UiIcon Name="power" Size="14" />
                                             <span>@(context.IsEnabled ? "停用" : "启用")</span>
                                         </MenuItem>
@@ -346,6 +346,28 @@
         finally
         {
             _saving = false;
+        }
+    }
+
+    /// <summary>
+    /// 停用/启用前二次确认：停用会使凭证立即失效，误触代价高，
+    /// 与「重置密钥」「删除」保持一致的确认交互。
+    /// </summary>
+    private async Task ConfirmToggleStatusAsync(SubsystemResponse entry)
+    {
+        var confirmed = await ModalSvc.ConfirmAsync(new ConfirmOptions
+        {
+            Title = entry.IsEnabled ? "停用子系统" : "启用子系统",
+            Content = entry.IsEnabled
+                ? $"确认停用子系统「{entry.Name}」？停用后其凭证将立即失效。"
+                : $"确认启用子系统「{entry.Name}」？",
+            OkText = entry.IsEnabled ? "停用" : "启用",
+            CancelText = "取消"
+        });
+
+        if (confirmed)
+        {
+            await ToggleStatusAsync(entry);
         }
     }
 

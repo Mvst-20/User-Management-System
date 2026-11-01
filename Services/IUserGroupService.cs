@@ -30,6 +30,9 @@ public interface IUserGroupService
     Task<List<UserGroupMember>> GetGroupMembersAsync(ulong groupId);
     Task<List<UserGroupResponse>> GetUserGroupSummariesAsync(ulong userId);
 
+    /// <summary>取用户当前所属的全部权限组 ID（用于批量设置组时的“纯移除”判断）。</summary>
+    Task<List<ulong>> GetUserGroupIdsAsync(ulong userId);
+
     // ============ 权限分配 ============
     Task<bool> SetGroupPermissionsAsync(ulong groupId, List<ulong> permissionIds);
     Task<List<Permission>> GetGroupPermissionsAsync(ulong groupId);

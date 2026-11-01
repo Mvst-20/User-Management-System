@@ -36,6 +36,15 @@ public sealed class SubsystemService : ISubsystemService
             throw new BusinessException(ResultCodes.ValidationError, "子系统名称不能为空");
         if (string.IsNullOrWhiteSpace(code))
             throw new BusinessException(ResultCodes.ValidationError, "子系统标识不能为空");
+        if (name.Length > 64)
+            throw new BusinessException(ResultCodes.ValidationError, "子系统名称不能超过 64 个字符");
+        if (!IsValidCode(code))
+            throw new BusinessException(ResultCodes.ValidationError,
+                "子系统标识仅允许小写字母、数字、下划线和连字符，需以字母或数字开头，最长 64 个字符");
+        if (request.Description?.Trim().Length > 255)
+            throw new BusinessException(ResultCodes.ValidationError, "子系统描述不能超过 255 个字符");
+        if (request.HomeUrl?.Trim().Length > 512)
+            throw new BusinessException(ResultCodes.ValidationError, "主页地址不能超过 512 个字符");
 
         if (await _context.Subsystems.AnyAsync(s => s.Code == code, ct))
             throw new BusinessException(ResultCodes.Error, "子系统标识已存在");
@@ -226,6 +235,12 @@ public sealed class SubsystemService : ISubsystemService
     }
 
     // ==================== 内部 ====================
+
+    /// <summary>子系统标识：小写字母/数字开头，之后允许小写字母、数字、下划线与连字符，最长 64 字符。</summary>
+    private static bool IsValidCode(string code)
+        => code.Length is > 0 and <= 64
+           && char.IsAsciiLetterOrDigit(code[0])
+           && code.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-');
 
     private static (string ApiKey, string PlainSecret, string SecretHash) GenerateCredential()
     {

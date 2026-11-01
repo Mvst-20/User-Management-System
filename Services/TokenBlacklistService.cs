@@ -21,29 +21,25 @@ public class TokenBlacklistService : ITokenBlacklistService
         if (expiresAt <= DateTime.UtcNow)
             return; // Token 已自然过期，无需写入黑名单
 
-        var existing = await _context.RevokedTokens.FindAsync(jti);
-        if (existing == null)
-        {
-            _context.RevokedTokens.Add(new RevokedToken { Jti = jti, ExpiresAt = expiresAt });
-        }
-        else
-        {
-            existing.ExpiresAt = expiresAt;
-        }
-        await _context.SaveChangesAsync();
+        // 原子 UPSERT：并发撤销同一会话（例如 20 并发登录互相顶替）时不会因主键冲突返回 500；
+        // 已有记录取较晚的过期时间，避免提前清理仍在有效期内的撤销记录。
+        await _context.Database.ExecuteSqlRawAsync(
+            "INSERT INTO `revoked_tokens` (`jti`, `expires_at`) VALUES ({0}, {1}) " +
+            "ON DUPLICATE KEY UPDATE `expires_at` = GREATEST(`expires_at`, {1})",
+            jti, expiresAt);
 
         // 本实例命中缓存，避免后续重复查库
         _cache.Set(GetKey(jti), true, expiresAt - DateTime.UtcNow);
     }
 
-    public async Task<bool> IsBlacklistedAsync(string jti)
+    public async Task<bool> IsBlacklistedAsync(string jti, CancellationToken ct = default)
     {
         var cacheKey = GetKey(jti);
         if (_cache.TryGetValue(cacheKey, out bool cached) && cached)
             return true;
 
         var revoked = await _context.RevokedTokens
-            .AnyAsync(t => t.Jti == jti && t.ExpiresAt > DateTime.UtcNow);
+            .AnyAsync(t => t.Jti == jti && t.ExpiresAt > DateTime.UtcNow, ct);
 
         // 只缓存肯定结果；否定结果不缓存，保证其他实例撤销后本实例能立即感知
         if (revoked)

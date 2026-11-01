@@ -37,6 +37,7 @@ public class InitializationService : IHostedService
         var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
         var permissionService = scope.ServiceProvider.GetRequiredService<IPermissionService>();
         var userGroupService = scope.ServiceProvider.GetRequiredService<IUserGroupService>();
+        var systemSettingService = scope.ServiceProvider.GetRequiredService<ISystemSettingService>();
         var appConfig = scope.ServiceProvider.GetRequiredService<AppConfiguration>();
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
@@ -44,6 +45,9 @@ public class InitializationService : IHostedService
 
         // ============ 初始化权限和用户组 ============
         await permissionService.SeedPermissionsAndGroupsAsync();
+
+        // ============ 播种系统设置默认值（site_name / allow_login / allow_register）============
+        await systemSettingService.EnsureDefaultsAsync(cancellationToken);
 
         // ============ 创建系统初始用户（uid=0）============
         var initialGroup = await userGroupService.GetGroupByNameAsync(PermissionCodes.InitialGroupName);
@@ -56,7 +60,7 @@ public class InitializationService : IHostedService
                 Id = 0,
                 Username = "system",
                 Email = "system@internal.local",
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(systemPassword, 12),
+                PasswordHash = PasswordHasher.Hash(systemPassword),
                 Status = UserStatus.Normal,
                 EmailVerifiedAt = DateTime.UtcNow,
                 CreatedAt = DateTime.UtcNow
@@ -101,16 +105,15 @@ public class InitializationService : IHostedService
                 await userGroupService.AddMemberAsync(initialGroup.Id, 0);
             }
 
-            // ⚠️ 安全：明文密码仅输出到控制台一次，不写入文件
-            _logger.LogWarning(
-                "======== SYSTEM USER (uid=0) CREATED ========\n" +
-                "  Username: system\n" +
-                "  Email:    system@internal.local\n" +
-                "  Password: {Password}\n" +
-                "  Group:    {Group} (A-level supreme permission)\n" +
-                "  >>> CHANGE THIS PASSWORD IMMEDIATELY <<<\n" +
-                "================================================",
-                systemPassword, PermissionCodes.InitialGroupName);
+            // 安全：初始口令只写控制台（stdout），不经过 Serilog ——
+            // 否则会落入 logs/app-*.log 与运行日志页的内存缓冲区。
+            WriteInitialCredentialToConsole(
+                "SYSTEM USER (uid=0) CREATED",
+                systemUser.Username,
+                systemUser.Email,
+                systemPassword,
+                PermissionCodes.InitialGroupName,
+                "A-level supreme permission");
         }
 
         // ============ 确保 uid=0 始终在初始用户组 ============
@@ -133,7 +136,7 @@ public class InitializationService : IHostedService
             {
                 Username = "admin",
                 Email = "admin@system.local",
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword, 12),
+                PasswordHash = PasswordHasher.Hash(adminPassword),
                 Status = UserStatus.Normal,
                 EmailVerifiedAt = DateTime.UtcNow,
                 CreatedAt = DateTime.UtcNow
@@ -147,21 +150,41 @@ public class InitializationService : IHostedService
                 await userGroupService.AddMemberAsync(superAdminGroup.Id, adminUser.Id);
             }
 
-            // ⚠️ 安全：明文密码仅输出到控制台一次，不写入文件
-            _logger.LogWarning(
-                "======== ADMIN ACCOUNT CREATED ========\n" +
-                "  Username: admin\n" +
-                "  Email:    admin@system.local\n" +
-                "  Password: {Password}\n" +
-                "  Group:    {Group} (all permissions except A)\n" +
-                "  >>> CHANGE THIS PASSWORD IMMEDIATELY <<<\n" +
-                "==========================================",
-                adminPassword, PermissionCodes.SuperAdminGroupName);
+            // 安全：初始口令只写控制台（stdout），不经过 Serilog（同 uid=0 的处理）
+            WriteInitialCredentialToConsole(
+                "ADMIN ACCOUNT CREATED",
+                adminUser.Username,
+                adminUser.Email,
+                adminPassword,
+                PermissionCodes.SuperAdminGroupName,
+                "all permissions except A");
         }
         else
         {
             _logger.LogInformation("Administrator account already exists, skipping initialization");
         }
+    }
+
+    /// <summary>
+    /// 把一次性初始口令写到标准输出。
+    /// <para>
+    /// 特意不使用 <c>ILogger</c>：Serilog 会把日志同时写入 logs/ 文件与内存环形缓冲，
+    /// 后者可经 /api/admin/logs 在「运行日志」页读取，等于把口令交给任何持 admin:server 的账号。
+    /// 控制台输出可由部署者从 stdout 捕获，进程重启后不会进入可查询的日志缓冲。
+    /// </para>
+    /// </summary>
+    private static void WriteInitialCredentialToConsole(
+        string title, string username, string email, string password, string group, string permissionNote)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"======== {title} ========");
+        Console.WriteLine($"  Username: {username}");
+        Console.WriteLine($"  Email:    {email}");
+        Console.WriteLine($"  Password: {password}");
+        Console.WriteLine($"  Group:    {group} ({permissionNote})");
+        Console.WriteLine("  >>> CHANGE THIS PASSWORD IMMEDIATELY <<<");
+        Console.WriteLine("==========================================");
+        Console.Out.Flush();
     }
 
     public Task StopAsync(CancellationToken cancellationToken)

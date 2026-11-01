@@ -74,13 +74,17 @@
                                         </MenuItem>
                                     </PermissionGate>
                                     <PermissionGate Code="@PermissionCodes.UserGroupManageMembers">
-                                        <MenuItem Key="members" OnClick="@(() => OpenMembersAsync(context))">
+                                        <MenuItem Key="members"
+                                                  OnClick="@(() => OpenMembersAsync(context))"
+                                                  Disabled="@context.IsMemberLocked">
                                             <UiIcon Name="users" Size="14" />
                                             <span>成员</span>
                                         </MenuItem>
                                     </PermissionGate>
                                     <PermissionGate Code="@PermissionCodes.UserGroupManagePermissions">
-                                        <MenuItem Key="permissions" OnClick="@(() => OpenPermissionsAsync(context))">
+                                        <MenuItem Key="permissions"
+                                                  OnClick="@(() => OpenPermissionsAsync(context))"
+                                                  Disabled="@context.IsMemberLocked">
                                             <UiIcon Name="key-round" Size="14" />
                                             <span>权限</span>
                                         </MenuItem>
@@ -158,6 +162,11 @@
             else
             {
                 <div class="ucs-form">
+                    @if (_editing?.IsMemberLocked == true)
+                    {
+                        <Alert Type="@AlertType.Warning" ShowIcon="true"
+                               Message="该权限组受保护（成员锁定），不可添加或移除成员。" />
+                    }
                     <div class="ucs-filter-bar">
                         <div class="ucs-filter-item">
                             <span class="ucs-filter-label">添加成员（用户 ID）</span>
@@ -215,6 +224,11 @@
             else
             {
                 <div class="ucs-form">
+                    @if (_editing?.IsMemberLocked == true)
+                    {
+                        <Alert Type="@AlertType.Warning" ShowIcon="true"
+                               Message="该权限组受保护（成员锁定），成员与权限均不可修改。" />
+                    }
                     <Alert Type="@AlertType.Info" ShowIcon="true"
                            Message="@($"勾选后保存将整体替换该权限组的权限。已选 {_selectedPermissionIds.Count} 项；特殊权限（PERM_A/B/C）受额外限制。")" />
 
@@ -495,6 +509,12 @@
 
     private async Task OpenMembersAsync(UserGroupResponse group)
     {
+        if (group.IsMemberLocked)
+        {
+            _error = "该权限组受保护（成员锁定），不可修改成员。";
+            return;
+        }
+
         _editing = group;
         _membersVisible = true;
         _newMemberId = string.Empty;
@@ -582,6 +602,12 @@
 
     private async Task OpenPermissionsAsync(UserGroupResponse group)
     {
+        if (group.IsMemberLocked)
+        {
+            _error = "该权限组受保护（成员锁定），不可修改权限。";
+            return;
+        }
+
         _editing = group;
         _permissionsVisible = true;
         _success = null;
@@ -691,6 +717,12 @@
     {
         if (_editing is null)
         {
+            return;
+        }
+
+        if (_editing.IsMemberLocked)
+        {
+            _error = "该权限组受保护（成员锁定），不可修改权限。";
             return;
         }
 
