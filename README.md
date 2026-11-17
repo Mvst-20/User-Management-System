@@ -34,7 +34,7 @@
 
 ## 运行环境要求
 
-- .NET 8 SDK
+- .NET 8 SDK（当前目标 `net8.0`；.NET 8 已于 2026-11-10 结束支持，迁移 .NET 10 需等待 Pomelo EF Core 10 provider 可用，详见「安全说明」）
 - MySQL 8.0
 - 反向代理（生产环境，用于 TLS 终止与 WebSocket 转发）
 
@@ -109,7 +109,7 @@ SMTP 配置存于数据库，通过管理控制台「邮件服务」页面维护
 
 - 配置文件中不含 `Smtp` 段落，启动时不从配置文件导入。
 - 端口规则：587 使用 STARTTLS，465 使用 SSL 直连，其他端口由 `UseSsl` 决定。
-- 密码经 Data Protection 加密后入库。密钥环默认持久化到 `keys/`（可用 `AppSettings:DataProtectionKeysPath` 指定）。密钥环丢失将导致已存密码无法解密，邮件服务降级为「未配置」，需重新录入。
+- 密码经 Data Protection 加密后入库。密钥环默认持久化到 `keys/`（可用 `AppSettings:DataProtectionKeysPath` 指定）。生产环境应同时配置 `AppSettings:DataProtectionCertificatePath`（PFX/P12）对密钥环做静态加密，否则 `keys/` 中的密钥以明文落盘。密钥环丢失将导致已存密码无法解密，邮件服务降级为「未配置」，需重新录入。
 
 ### 3. JWT
 
@@ -185,6 +185,8 @@ SMTP 配置存于数据库，通过管理控制台「邮件服务」页面维护
 | `AdminPasswordLength` | 首次启动生成的初始账号口令长度，默认 12 |
 | `SelfBaseUrl` | 控制台回环调用本进程 REST API 的基地址。**可选覆盖项，一般留空即可**：留空时自动使用进程真实监听地址（多地址优先 `http`；通配地址 `0.0.0.0` / `[::]` / `*` / `+` 规范化为 `localhost`）。仅当自动解析出的地址无法从本机访问时才需显式填写 |
 | `DataProtectionKeysPath` | Data Protection 密钥环目录，默认 `keys`，相对应用工作目录 |
+| `DataProtectionCertificatePath` | 可选：PFX/P12 证书路径，用于 `ProtectKeysWithCertificate` 静态加密密钥环 |
+| `DataProtectionCertificatePassword` | 可选：PFX/P12 口令，建议用环境变量 `AppSettings__DataProtectionCertificatePassword` 注入 |
 
 - 回环调用地址取自**进程真实监听的地址**（与 `launchSettings` / `--urls` / `ASPNETCORE_URLS` / `HTTP_PORTS` / IIS-ANCM 动态端口无关，均能正确解析），因此**无需配置任何环境变量**即可在本地 `dotnet run` 与生产环境工作。
 - 解析不到任何 HTTP/HTTPS 监听地址时应用**启动即失败**并在控制台与 `logs/` 给出指引，不会回落到一个没人监听的地址。此时可按提示设置 `AppSettings:SelfBaseUrl`（或环境变量 `AppSettings__SelfBaseUrl`）为**本机可达**的地址。
@@ -208,6 +210,7 @@ SMTP 配置存于数据库，通过管理控制台「邮件服务」页面维护
     "AlertOnNewDevice": true,
     "AlertOnNewLocation": true,
     "AlertDedupHours": 24,
+    "UniformAuthErrors": true,
     "Ip2RegionDbPath": "App_Data/ip2region.xdb"
   }
 }
@@ -224,7 +227,10 @@ SMTP 配置存于数据库，通过管理控制台「邮件服务」页面维护
 | `Security:AlertOnNewDevice` | 新设备登录时发送邮件提醒，默认开启 |
 | `Security:AlertOnNewLocation` | 异地登录时发送邮件提醒，默认开启 |
 | `Security:AlertDedupHours` | 同一设备+地点的提醒去重窗口（小时），默认 24 |
+| `Security:UniformAuthErrors` | 统一认证失败响应，默认 `true`：登录失败状态（不存在/密码错误/封禁/删除/未验证）返回相同响应，注册重复用户名/邮箱返回通用成功响应，防止账户枚举；需要旧版精确错误码时设为 `false` |
 | `Security:Ip2RegionDbPath` | 离线 IP 库路径，相对内容根目录；缺失时归属地显示为「未知」且不影响登录 |
+| `AppSettings:DataProtectionCertificatePath` | 用于静态加密 Data Protection 密钥环的 PFX/P12 证书路径；留空时密钥环以明文落盘（生产环境会记录警告） |
+| `AppSettings:DataProtectionCertificatePassword` | 证书口令，建议通过环境变量 `AppSettings__DataProtectionCertificatePassword` 注入 |
 
 - IP 归属地使用离线库 `ip2region.xdb`（[ip2region](https://github.com/lionsoul2014/ip2region) 项目，取 `data/ip2region.xdb`）。把文件放到 `App_Data/ip2region.xdb` 即可，发布时会随输出复制；未放置时系统仍可正常运行，仅归属地解析降级为「未知」。
 - 登录风险提醒走有界内存队列异步发送，登录接口不等待邮件结果；SMTP 未配置或发送失败只记日志，不影响登录。
@@ -367,7 +373,7 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 ### 权限检查逻辑
 
 1. 从 JWT 获取用户 ID。
-2. 查询用户所属全部权限组及权限（内存缓存，键带全局权限版本前缀，版本变化即失效，兜底 TTL 2 分钟；数据库不可用或查询超过 3 秒时回落到该用户最近一次成功快照（保留 30 分钟），无快照按无权限处理）。
+2. 查询用户所属全部权限组及权限（内存缓存，键带全局权限版本前缀，版本变化即失效，兜底 TTL 2 分钟）。数据库查询失败或超时按“无权限”处理（fail-closed），不会使用历史快照放行。
 3. 检查顺序：
    - 拥有 A 权限 → 通过
    - API 属于 B 覆盖范围（权限管理 + 权限组管理）且拥有 B → 通过
@@ -403,6 +409,8 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 - 不合法输入统一返回 HTTP 400 / `code=2`，不再出现数据库超长异常导致的 500。
 
 - 注册限流：同一邮箱每分钟最多 5 次。
+- 账户枚举防护（`Security:UniformAuthErrors=true`，默认）：登录失败（用户不存在/密码错误/已删除/已封禁/未验证）统一返回 HTTP 400 / `code=201`「账号或密码错误」；注册时用户名或邮箱已存在返回与成功一致的通用响应（200 / `code=100`），不泄露账号是否存在。需要旧版 203/204/207 等精确错误码时设为 `false`。
+- 登录限流：IP 20 次/5 分钟、账号 5 次/5 分钟，密码校验前原子递增；超限返回 429 / `code=205`。
 - 新注册用户自动加入所有开启「基本用户权限」（`is_default_for_new_users = true`）的权限组。内置「普通用户」组默认开启；若所有组关闭该标记，新用户不加入任何权限组。
 
 ### 用户端点（认证 + 权限）
@@ -431,7 +439,7 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 - `allowSelf`：路由参数 `{id}` 与当前用户 ID 匹配时跳过权限检查。change-password 与 change-email 不使用 allowSelf，而是要求权限并手动校验仅限本人。
 - 邮箱修改：普通用户不能通过 PUT/PATCH 直接修改邮箱，须走 change-email 流程（验证密码 → 发送验证邮件 → 确认修改）；管理员可直接通过 PUT 修改。
 - 手机号：仅在 PUT/PATCH 更新时支持，最大 20 字符，注册时不支持。
-- 头像上传：仅支持 JPG/PNG/GIF/WebP，最大 6MB。大于 512KB 时压缩并生成 256px 缩略图，否则缩略图等于原图。
+- 头像上传：仅支持 JPG/PNG/GIF/WebP，最大 6MB；解码前限制单边 ≤10000px、单帧 ≤2000 万像素、动画 ≤20 帧，并限制同时处理的图片数与单用户 20 次/小时。大于 512KB 时压缩并生成 256px 缩略图，否则缩略图等于原图。
 - 头像授权：本人可操作自己的头像；操作他人头像额外需要 `user:update` 且目标用户级别低于自己（仅持有 `avatar:upload` 的普通用户不能覆盖他人头像）。
 - `GET /api/users/me/permissions` 返回 `{ userId, codes: [...] }`，`codes` 为展开 A/B/C 覆盖后的有效权限码，供前端控制菜单与按钮显隐。
 
@@ -572,7 +580,7 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 |------|------|---------|
 | 0xx | 通用 | 0=成功, 1=错误, 2=验证错误, 3=未授权, 4=禁止, 5=不存在, 6=内部错误, 7=频率限制 |
 | 1xx | 注册 | 100=成功, 101=用户名存在, 102=邮箱已注册, 103=手机号已使用 |
-| 2xx | 登录 | 200=成功, 201=用户名或密码错误, 203=账号已注销, 204=账号被封禁, 205=登录频繁限制, 206=账号已被封禁, 207=账号未验证 |
+| 2xx | 登录 | 200=成功, 201=用户名或密码错误（统一模式亦用于删除/封禁/未验证）, 203=账号已注销, 204=账号被封禁, 205=登录频繁限制, 206=账号已被封禁, 207=账号未验证 |
 | 3xx | 邮箱验证 | 300=成功, 301=无效链接, 302=链接过期, 303=无效类型, 304=用户不存在, 310=重发成功, 311=频率限制, 312=用户不存在, 313=已验证 |
 | 4xx | 邮箱修改 | 400=请求成功, 401=邮箱相同, 402=邮箱已使用, 403=密码错误, 410=确认成功, 411=无效链接, 412=链接过期, 413=无效新邮箱 |
 | 5xx | 密码修改 | 500=成功, 501=当前密码错误, 502=新旧密码相同 |
@@ -621,7 +629,7 @@ Visual Studio 启动行为（由 `Properties/launchSettings.json` 控制）：
 | 表名 | 说明 |
 |------|------|
 | `users` | 用户（含 JSON 扩展字段 `extras`） |
-| `email_verification_tokens` | 邮箱验证令牌 |
+| `email_verification_tokens` | 邮箱验证令牌（Token 仅存 SHA-256 哈希，验证时原子删除保证单次使用） |
 | `permissions` | 权限（含 A/B/C 与各 API 权限；`creator_id` 创建人，`subsystem_id` 归属子系统） |
 | `user_groups` | 权限组（`level`、`is_protected`、`is_member_locked`、`is_default_for_new_users`） |
 | `user_group_members` | 权限组成员关联 |
@@ -707,13 +715,13 @@ UCS/
 1. 首次运行后应登录并修改管理员及初始用户口令。
 2. 密码使用 BCrypt Work Factor 11 存储（历史 cost=12 的密码仍可正常校验，登录后不会自动重算）。
 3. 初始账号口令仅输出到标准输出（stdout），不写入 logs/ 文件，也不进入「运行日志」页的内存缓冲。升级前已落盘的历史口令无法自动擦除，请在升级说明中安排清理并立即修改初始口令。
-4. 登录暴力破解防护：IP 20 次/5 分钟 + 账号 5 次/5 分钟双重限流，计数存库、多实例共享。
-5. 邮箱验证/修改与注册均带频率限制（注册：同邮箱每分钟最多 5 次；邮件发送：同邮箱每分钟 1 次）。
+4. 登录暴力破解防护：限流在密码校验前**原子递增**（IP 20 次/5 分钟 + 账号 5 次/5 分钟），并发请求在数据库层串行化，不能通过同时读到旧计数绕过；成功登录后清零对应计数，避免误锁。
+5. 注册与重发验证邮件使用原子预递增限流（同一邮箱分别为 5 次/分钟、1 次/分钟）。
 6. 封禁用户无法登录，也无法获取 JWT Token。
-7. 头像端点做路径遍历防护；上传校验文件魔数签名；大于 512KB 自动压缩并生成 256px 缩略图。本人只能操作自己的头像；操作他人头像需要 `user:update` 且目标用户级别低于自己，单纯持有 `avatar:upload` 的普通用户不能覆盖他人头像。
-8. JWT Token 支持黑名单撤销；同时校验 `sid` 指向的会话是否仍然有效，登出、踢出、封禁、改密后旧 Token 在数秒内失效。
+7. 头像端点做路径遍历防护；上传校验文件魔数签名；解码前/后均限制尺寸、单帧像素与动画帧数，并限制并发解码数和用户级上传频率。本人只能操作自己的头像；操作他人头像需要 `user:update` 且目标用户级别低于自己，单纯持有 `avatar:upload` 的普通用户不能覆盖他人头像。
+8. JWT Token 支持黑名单撤销；同时校验 `sid` 指向的会话是否仍然有效，登出、踢出、封禁、改密后旧 Token 在数秒内失效。数据库无法确认黑名单/会话/用户状态时**拒绝认证**（fail-closed），不回退为“仅校验签名”。
 9. 登录会话按设备独立保存（Refresh Token 有效期默认 30 天），支持多设备同时在线；同一「浏览器 + 操作系统」只保留最近一次登录，新登录会顶掉旧会话并写入 `revoked / replaced_by_new_device` 审计。
-10. Refresh Token 每次刷新都轮换，旧值立即失效；检测到已用过的 Token 被再次提交时，判定为复用攻击并撤销整条会话。刷新接口按 IP 限流（1 分钟 30 次无效请求），超限返回 429 / `code=7`。
+10. Refresh Token 每次刷新都轮换，旧值立即失效；检测到已用过的 Token 被再次提交时，判定为复用攻击并撤销整条会话。刷新接口按 IP 原子限流（1 分钟 30 次），超限返回 429 / `code=7`。
 11. 异常中间件在生产环境隐藏内部错误详情。
 12. A 权限仅限「初始用户」组，不可分配给其他权限组；特殊权限（A/B/C）不可通过 API 创建、修改或删除。
 13. 权限缓存采用全局版本号 + 版本前缀键，权限写操作只自增一次版本号，所有实例在约 1 秒内返回新结果；不再逐用户清缓存，批量改组内成员也不会产生 O(N) 写放大。
@@ -729,7 +737,11 @@ UCS/
 23. 离线 IP 库仅做本地查询，不外发 IP；库文件缺失时归属地降级为「未知」，异地判定退回网段比对。
 24. 软删除用户不占用用户名/邮箱/手机号唯一性：数据库使用 `status=4` 时为 NULL 的生成列 + 唯一索引，删除后可用同名/同邮箱/同手机号重新注册，旧记录保持软删除。当前 API 不提供恢复接口（对已软删除用户调用 `PUT/PATCH /api/users/{id}` 一律返回 404）。
 25. 依赖漏洞扫描：CI 应执行 `dotnet list UserManagementSystem.csproj package --vulnerable --include-transitive`，发现 High/Moderate advisory 即失败。项目直接引用 `MySqlConnector 2.6.2` 与 `System.Security.Cryptography.Pkcs 8.0.2`，覆盖 Pomelo 传递依赖中的旧版本。
-26. 可用性降级（可用性与安全性的显式权衡）：数据库不可用时，鉴权层在 3 秒超时后**只校验令牌签名、有效期、issuer/audience**（跳过黑名单、会话有效性与封禁状态），权限检查回落到最近一次快照；数据库恢复后立即回到严格校验。故障窗口内已撤销的令牌可能仍被接受，对安全性敏感的环境应保证数据库高可用，并避免在该窗口执行高危操作。
+26. 认证与授权 fail-closed：数据库不可用或数据库校验超时（3 秒）时，受保护 API 拒绝认证（401）而不是降级放行；权限查询失败返回无权限（403），不使用历史权限快照。`/health` 仍保持匿名健康探测。
+27. 邮箱验证/变更 Token 在数据库中以 SHA-256 十六进制哈希存储，明文只在生成时交给邮件发送流程；数据库备份/查询日志泄露不会直接得到可用 Token。验证时按“删除影响行数=1”原子消费，保证单次使用；升级迁移 `InvalidateLegacyVerificationTokens` 会清除旧版明文 Token（用户可重新发起验证）。
+28. 账户枚举防护：`Security:UniformAuthErrors` 默认 `true`，登录失败（不存在/密码错误/封禁/删除/未验证）返回统一响应；注册重复用户名/邮箱返回通用成功响应。需要旧版精确错误码的客户端可设为 `false`。
+29. Data Protection 密钥环支持证书静态加密：配置 `AppSettings:DataProtectionCertificatePath`（PFX/P12）与口令（建议用环境变量 `AppSettings__DataProtectionCertificatePassword` 注入）；未配置时生产环境启动会记录警告，`keys/` 目录必须限制访问权限。
+30. .NET 8 已于 2026-11-10 结束支持；当前仍为 `net8.0` 是因为 Pomelo.EntityFrameworkCore.MySql 尚无 EF Core 10 provider（最新 9.0.0）。在 Pomelo 提供 10.x 或完成数据库提供程序替换前，无法安全迁移到 .NET 10 LTS；应把该升级列为独立任务并跟踪上游。
 
 ## 生产环境部署清单
 
@@ -738,9 +750,12 @@ UCS/
 
 - 通过环境变量 `UCS_DB_CONNECTION` 提供数据库连接串。
 - 通过环境变量 `Jwt__Key` 提供 64+ 字符的随机签名密钥；生产环境建议同时设置 `Jwt__RequireExternalKey=true`，禁止自动生成兜底。
-- 升级到本版本时：先备份数据库，再执行两个迁移（`dotnet ef database update` 或首次启动自动迁移）：
+- 升级到本版本时：先备份数据库，再执行三个迁移（`dotnet ef database update` 或首次启动自动迁移）：
   - `AddSoftDeleteAwareUniqueIndexes`：为 users 增加软删除感知唯一索引（会短暂重建表）；
-  - `RemoveNormalUserAdminPermissions`：清理「普通用户」组的 `user:read` / `user:update` 越权授权。
+  - `RemoveNormalUserAdminPermissions`：清理「普通用户」组的 `user:read` / `user:update` 越权授权；
+  - `InvalidateLegacyVerificationTokens`：清除旧版明文邮箱验证 Token（用户重新发起验证即可）。
+- 生产环境配置 `Security:UniformAuthErrors=true`（默认）并评估旧客户端对统一错误响应的兼容性。
+- 生产环境配置 Data Protection 证书（PFX/P12）并对 `keys/` 设置严格 ACL；证书口令通过环境变量注入。
 - 轮换已暴露的 JWT Key 与数据库口令（旧密钥/口令不得继续使用）；轮换 Key 会使所有现有登录失效。
 - 清理历史 `logs/app-*.log` 中可能存在的旧版初始账号口令，并修改 admin/system 初始口令。
 - 配置 `AllowedOrigins` 限制跨域来源。

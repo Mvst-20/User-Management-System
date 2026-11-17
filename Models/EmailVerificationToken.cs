@@ -13,6 +13,10 @@ public class EmailVerificationToken
     [Column("user_id")]
     public ulong UserId { get; set; }
 
+    /// <summary>
+    /// 验证 Token 的 SHA-256 十六进制哈希（不是明文）。
+    /// 明文仅在创建时返回给邮件发送流程，数据库泄露时无法直接复用。
+    /// </summary>
     [Required]
     [MaxLength(255)]
     [Column("token")]

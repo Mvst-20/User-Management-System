@@ -1,3 +1,4 @@
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using AntDesign;
 using Microsoft.AspNetCore.Authentication;
@@ -79,9 +80,49 @@ public static class ServiceCollectionExtensions
 
         Directory.CreateDirectory(keysPath);
 
-        builder.Services.AddDataProtection()
+        var dataProtection = builder.Services.AddDataProtection()
             .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
             .SetApplicationName("UCS");
+
+        // 静态加密密钥环：指定自定义文件系统存储后，密钥默认以明文 XML 落盘；
+        // 生产环境应提供 PFX/P12 证书（口令通过环境变量注入），避免 keys/ 泄露即失守。
+        var certificatePath = appConfig.AppSettings.DataProtectionCertificatePath;
+        if (!string.IsNullOrWhiteSpace(certificatePath))
+        {
+            var fullPath = Path.IsPathRooted(certificatePath)
+                ? certificatePath
+                : Path.Combine(builder.Environment.ContentRootPath, certificatePath);
+
+            if (!File.Exists(fullPath))
+            {
+                throw new FileNotFoundException(
+                    $"Data Protection 证书文件不存在：{fullPath}（检查 AppSettings:DataProtectionCertificatePath）",
+                    fullPath);
+            }
+
+            try
+            {
+                var certificate = new X509Certificate2(
+                    fullPath,
+                    appConfig.AppSettings.DataProtectionCertificatePassword,
+                    X509KeyStorageFlags.EphemeralKeySet);
+
+                dataProtection.ProtectKeysWithCertificate(certificate);
+                Serilog.Log.Information("Data Protection 密钥环已使用证书静态加密");
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "加载 Data Protection 证书失败，请检查 PFX 路径与口令（AppSettings:DataProtectionCertificatePath/Password）",
+                    ex);
+            }
+        }
+        else if (builder.Environment.IsProduction())
+        {
+            Serilog.Log.Warning(
+                "Data Protection 密钥环未配置静态加密证书，keys/ 目录中的密钥以明文落盘；" +
+                "生产环境请设置 AppSettings:DataProtectionCertificatePath 与证书口令，并限制 keys/ 目录访问权限");
+        }
     }
 
     /// <summary>
@@ -295,18 +336,19 @@ public static class ServiceCollectionExtensions
                     }
                     catch (OperationCanceledException) when (!context.HttpContext.RequestAborted.IsCancellationRequested)
                     {
-                        // 数据库校验超时：按可用性降级放行，签名/有效期仍由 JwtBearer 严格校验
+                        // 认证状态无法验证时必须 fail-closed：数据库校验超时说明黑名单/会话/用户状态
+                        // 都未确认，不能放行，否则已撤销的令牌在数据库故障期间仍可访问受保护接口。
                         var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
-                        logger.LogWarning("鉴权阶段的数据库校验超时（3s），本次请求已降级为仅校验令牌签名与有效期");
+                        logger.LogError("鉴权阶段的数据库校验超时（3s），拒绝认证");
+                        context.Fail("Authentication state unavailable");
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        // 数据库整体不可用（连接中断、重试耗尽）时，监控/诊断端点仍需可达：
-                        // 仅对“数据库校验失败”降级放行，令牌签名、有效期、issuer/audience 仍由
-                        // JwtBearer 严格校验。故障窗口内撤销状态可能滞后，恢复后立即回到严格校验。
+                        // 数据库整体不可用（连接中断、重试耗尽）时同样 fail-closed。
+                        // 健康检查 /health 仍保持匿名可用，用于存活探测；受保护 API 不做降级放行。
                         var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
-                        logger.LogWarning(ex,
-                            "鉴权阶段的数据库校验失败，本次请求已降级为仅校验令牌签名与有效期");
+                        logger.LogError(ex, "鉴权阶段的数据库校验失败，拒绝认证");
+                        context.Fail("Authentication state unavailable");
                     }
                 }
             };

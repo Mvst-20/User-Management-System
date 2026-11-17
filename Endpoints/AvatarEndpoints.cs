@@ -41,6 +41,48 @@ public static class AvatarEndpoints
     /// </summary>
     private const int JpegQuality = 80;
 
+    /// <summary>单张图片允许的最大边长（像素）。</summary>
+    private const uint MaxImageDimension = 10_000;
+
+    /// <summary>单帧允许的最大像素数（宽 × 高）。</summary>
+    private const ulong MaxImagePixels = 20_000_000;
+
+    /// <summary>动画图片允许的最大帧数。</summary>
+    private const int MaxImageFrames = 20;
+
+    /// <summary>解码后内存上限（超过后 ImageMagick 会使用磁盘缓存）。</summary>
+    private const ulong ImageMemoryLimitBytes = 256UL * 1024 * 1024;
+
+    /// <summary>单次内存分配请求上限。</summary>
+    private const ulong MaxMemoryRequestBytes = 64UL * 1024 * 1024;
+
+    /// <summary>同时进行的图片处理数上限，避免并发解码耗尽 CPU/内存。</summary>
+    private static readonly SemaphoreSlim ImageProcessingGate = new(2, 2);
+
+    /// <summary>设置 ImageMagick 进程级资源限制（在映射端点时调用一次）。</summary>
+    private static void ConfigureImageResourceLimits()
+    {
+        ResourceLimits.Width = MaxImageDimension;
+        ResourceLimits.Height = MaxImageDimension;
+        ResourceLimits.Area = MaxImagePixels;
+        ResourceLimits.ListLength = MaxImageFrames;
+        ResourceLimits.Memory = ImageMemoryLimitBytes;
+        ResourceLimits.MaxMemoryRequest = MaxMemoryRequestBytes;
+        ResourceLimits.Thread = 2;
+        ResourceLimits.Time = 10;
+    }
+
+    /// <summary>校验图片尺寸/帧数是否超过资源上限。</summary>
+    private static void ValidateImageDimensions(uint width, uint height, string reason)
+    {
+        if (width == 0 || height == 0 ||
+            width > MaxImageDimension || height > MaxImageDimension ||
+            (ulong)width * (ulong)height > MaxImagePixels)
+        {
+            throw new InvalidDataException($"图片尺寸超出限制（{reason}）");
+        }
+    }
+
     /// <summary>
     /// 验证文件流的前几个字节是否匹配指定扩展名的魔数签名
     /// </summary>
@@ -78,16 +120,31 @@ public static class AvatarEndpoints
     /// </summary>
     private static (byte[]? compressed, byte[]? thumbnail) CompressImage(Stream sourceStream, string extension, long originalSize)
     {
-        if (originalSize <= CompressionThreshold)
-            return (null, null);
+        // 先读文件头获取尺寸，避免对超大图片进行完整解码。
+        // 注意：MagickImageInfo 只解析头部，不分配完整像素缓存。
+        sourceStream.Position = 0;
+        var info = new MagickImageInfo(sourceStream);
+        ValidateImageDimensions(info.Width, info.Height, "header");
 
         sourceStream.Position = 0;
-
         using var images = new MagickImageCollection();
         images.Read(sourceStream);
 
         if (images.Count == 0)
             throw new InvalidDataException("图片内容为空或无法解析");
+
+        if (images.Count > MaxImageFrames)
+            throw new InvalidDataException($"图片帧数超出限制（最多 {MaxImageFrames} 帧）");
+
+        // 逐帧复核：防止多帧图片的总解码资源超限
+        foreach (var frame in images)
+        {
+            ValidateImageDimensions(frame.Width, frame.Height, "frame");
+        }
+
+        // 小文件同样完成了完整解码与结构校验，只是不重新压缩/生成缩略图
+        if (originalSize <= CompressionThreshold)
+            return (null, null);
 
         var format = GetMagickFormat(extension);
 
@@ -186,6 +243,9 @@ public static class AvatarEndpoints
     {
         var avatarsPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "avatars");
 
+        // 进程级图片解码资源限制：必须在任何图片处理前设置
+        ConfigureImageResourceLimits();
+
         // 上传/更换头像（允许本人或拥有 avatar:upload 权限）
         app.MapPost("/api/users/{id}/avatar", async (
             ulong id,
@@ -193,6 +253,7 @@ public static class AvatarEndpoints
             [FromServices] IUserService userService,
             [FromServices] IPermissionService permissionService,
             [FromServices] IUserGroupService userGroupService,
+            [FromServices] IRateLimitService rateLimitService,
             HttpContext httpContext) =>
         {
             var logger = httpContext.RequestServices.GetRequiredService<ILoggerFactory>()
@@ -250,6 +311,13 @@ public static class AvatarEndpoints
                 }
             }
 
+            // 用户级限流：防止单账号高频上传消耗图片解码资源
+            if (await rateLimitService.IsLimitedAsync(
+                    $"avatar_upload_user_{actorId.Value}", 20, TimeSpan.FromHours(1)))
+            {
+                return Results.Json(new ApiResponse(ResultCodes.TooManyRequests, "上传过于频繁，请稍后再试"), statusCode: 429);
+            }
+
             // 验证文件扩展名（防止 XSS：拒绝 .html/.svg 等）
             // FileName 安全处理：浏览器发来的文件名通常不含路径，但做防御性处理
             var safeFileName = Path.GetFileName((file.FileName ?? string.Empty).Trim());
@@ -299,7 +367,18 @@ public static class AvatarEndpoints
             {
                 // 压缩处理（包含在 try 内，捕获图片解码异常）
                 fileStream.Position = 0;
-                var (compressed, thumbnail) = CompressImage(fileStream, extension, file.Length);
+                byte[]? compressed;
+                byte[]? thumbnail;
+
+                await ImageProcessingGate.WaitAsync(httpContext.RequestAborted);
+                try
+                {
+                    (compressed, thumbnail) = CompressImage(fileStream, extension, file.Length);
+                }
+                finally
+                {
+                    ImageProcessingGate.Release();
+                }
 
                 bool hasThumbnail = false;
 
@@ -336,7 +415,8 @@ public static class AvatarEndpoints
             {
                 logger.LogWarning(ex, "[AVATAR-UPLOAD] FAIL: invalid image content");
                 DeleteAvatarFiles(avatarsPath, $"/avatars/{fileName}");
-                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, "图片内容无效或已损坏"));
+                var message = ex is InvalidDataException ? ex.Message : "图片内容无效或已损坏";
+                return Results.BadRequest(new ApiResponse(ResultCodes.UploadAvatarFail_InvalidType, message));
             }
             catch (InvalidOperationException ex)
             {

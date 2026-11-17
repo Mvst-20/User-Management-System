@@ -204,8 +204,6 @@ public class PermissionService : IPermissionService
         if (_cache.TryGetValue(cacheKey, out List<string>? cachedPermissions) && cachedPermissions != null)
             return cachedPermissions;
 
-        var snapshotKey = LastKnownPermissionCacheKey(userId);
-
         try
         {
             var groupIds = await _context.UserGroupMembers
@@ -229,22 +227,13 @@ public class PermissionService : IPermissionService
             }
 
             _cache.Set(cacheKey, permissionCodes, ttl);
-
-            // 最近一次成功快照：数据库短暂不可用时用于鉴权降级，避免监控/诊断端点因 500 不可达
-            _cache.Set(snapshotKey, permissionCodes, TimeSpan.FromMinutes(30));
             return permissionCodes;
         }
         catch (Exception ex)
         {
-            // 包含超时/取消：鉴权查询设置了短超时，超时同样应回落到最近快照而不是 500
-            _logger.LogWarning(ex, "读取用户 {UserId} 的权限失败（数据库可能不可用或查询超时），尝试使用最近一次快照", userId);
-
-            if (_cache.TryGetValue(snapshotKey, out List<string>? lastKnown) && lastKnown is not null)
-            {
-                return lastKnown;
-            }
-
-            // 无快照时按“无权限”处理（fail-closed），不把数据库异常暴露为 500
+            // 权限查询失败时必须 fail-closed：不能使用“最近一次成功快照”放行，
+            // 否则权限被撤销后，在数据库故障窗口内旧权限仍然有效。
+            _logger.LogError(ex, "读取用户 {UserId} 的权限失败，拒绝授权", userId);
             return new List<string>();
         }
     }
@@ -293,18 +282,16 @@ public class PermissionService : IPermissionService
             _cache.Set(cacheKey, allCodes, ttl);
             return allCodes;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             // A 权限的鉴权本身已在 HasPermissionAsync 中直接命中，这里仅用于前端展开；
-            // 数据库不可用时返回空集合即可，不抛出 500。
-            _logger.LogWarning(ex, "读取全量权限码失败（数据库可能不可用），本次返回空集合");
+            // 查询失败时返回空集合（fail-closed），不抛出 500。
+            _logger.LogError(ex, "读取全量权限码失败，本次返回空集合");
             return new List<string>();
         }
     }
 
     private static string UserPermissionCacheKey(long version, ulong userId) => $"perm:v{version}:user:{userId}";
-
-    private static string LastKnownPermissionCacheKey(ulong userId) => $"perm:last:user:{userId}";
 
     private static string AllPermissionCodesCacheKey(long version) => $"perm:v{version}:all";
 

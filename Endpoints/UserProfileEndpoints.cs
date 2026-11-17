@@ -658,13 +658,13 @@ public static class UserProfileEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_EmailExists, "该邮箱已被使用"));
             }
 
-            var token = await tokenService.CreateVerificationTokenAsync(
+            var tokenIssue = await tokenService.CreateVerificationTokenAsync(
                 id, VerificationTokenType.EmailChange, newEmail);
 
             try
             {
                 await emailService.SendVerificationEmailAsync(
-                    newEmail, user.Username, token.Token, true, newEmail);
+                    newEmail, user.Username, tokenIssue.PlainToken, true, newEmail);
             }
             catch (Exception ex)
             {

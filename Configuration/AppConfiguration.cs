@@ -99,6 +99,13 @@ public class SecurityConfig
     /// <summary>同一用户 + 同一设备 + 同一地点的提醒去重窗口（小时）。</summary>
     public int AlertDedupHours { get; set; } = 24;
 
+    /// <summary>
+    /// 统一认证失败响应：为 true 时登录失败（不存在/密码错误/封禁/删除/未验证）返回完全相同的
+    /// HTTP 状态与业务码，注册重复用户名/邮箱也返回通用成功响应，防止账户枚举。
+    /// 需要兼容旧客户端精确错误码时可设为 false。
+    /// </summary>
+    public bool UniformAuthErrors { get; set; } = true;
+
     /// <summary>离线 IP 库文件路径（相对路径基于内容根目录）。留空或文件缺失时归属地降级为「未知」。</summary>
     public string Ip2RegionDbPath { get; set; } = "App_Data/ip2region.xdb";
 }
@@ -122,4 +129,17 @@ public class AppSettings
     /// 相对路径基于应用工作目录；留空时使用 "keys"。
     /// </summary>
     public string DataProtectionKeysPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 用于静态加密 Data Protection 密钥环的证书（PFX/P12）路径。
+    /// 留空时密钥环以明文 XML 落盘，仅适合本地开发；生产环境应配置此项或改用 DPAPI/密钥服务。
+    /// 相对路径基于内容根目录。
+    /// </summary>
+    public string DataProtectionCertificatePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// PFX/P12 证书口令；建议通过环境变量 <c>AppSettings__DataProtectionCertificatePassword</c> 注入，
+    /// 不要写入仓库配置文件。
+    /// </summary>
+    public string DataProtectionCertificatePassword { get; set; } = string.Empty;
 }

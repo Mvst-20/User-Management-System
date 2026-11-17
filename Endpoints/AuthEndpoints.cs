@@ -25,6 +25,7 @@ public static class AuthEndpoints
             [FromServices] IUserGroupService userGroupService,
             [FromServices] ISystemSettingService systemSettingService,
             [FromServices] IRateLimitService rateLimitService,
+            [FromServices] AppConfiguration appConfig,
             [FromServices] ILogger<Program> logger) =>
         {
             // 检查是否允许注册
@@ -62,12 +63,26 @@ public static class AuthEndpoints
             // 检查用户名是否已存在（排除已软删除用户）
             if (await userService.ActiveUsernameExistsAsync(username))
             {
+                if (appConfig.Security.UniformAuthErrors)
+                {
+                    // 不泄露用户名是否已存在；发送通用通知并返回与真实注册一致的响应，
+                    // SMTP 成功/失败的表现也与真实注册相同，避免通过响应差异枚举账号。
+                    PasswordHasher.VerifyDummy(request.Password);
+                    return await DuplicateRegistrationResultAsync(emailService, logger, email);
+                }
+
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_UsernameExists, "用户名已存在"));
             }
 
             // 检查邮箱是否已存在（排除已软删除用户）
             if (await userService.ActiveEmailExistsAsync(email))
             {
+                if (appConfig.Security.UniformAuthErrors)
+                {
+                    PasswordHasher.VerifyDummy(request.Password);
+                    return await DuplicateRegistrationResultAsync(emailService, logger, email);
+                }
+
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "邮箱已被注册"));
             }
 
@@ -100,14 +115,14 @@ public static class AuthEndpoints
                 await userGroupService.AddMemberAsync(defaultGroup.Id, user.Id);
             }
 
-            // 生成验证Token
-            var token = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
+            // 生成验证Token（数据库只保存哈希，明文仅用于本次邮件）
+            var tokenIssue = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
 
             // 发送验证邮件
             bool emailSent = true;
             try
             {
-                await emailService.SendVerificationEmailAsync(user.Email, user.Username, token.Token);
+                await emailService.SendVerificationEmailAsync(user.Email, user.Username, tokenIssue.PlainToken);
             }
             catch (Exception ex)
             {
@@ -145,30 +160,37 @@ public static class AuthEndpoints
 
             // 登录限流 key
             var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            var loginKey = request.Login;
+            var login = (request.Login ?? string.Empty).Trim();
+            if (login.Length == 0 || string.IsNullOrEmpty(request.Password))
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "请输入账号与密码"));
+            }
+
+            // 账号维度使用规范化后的 key，避免大小写/首尾空白绕过计数
             var ipKey = $"login_ip_{clientIp}";
-            var accountKey = $"login_account_{loginKey}";
+            var accountKey = $"login_account_{login.ToLowerInvariant()}";
 
-            // IP 限流检查：同一 IP 5 分钟内最多 20 次
-            if (await rateLimitService.GetCountAsync(ipKey) >= 20)
+            // 先原子递增再校验：并发请求在数据库层串行化计数，
+            // 不会出现“100 个请求同时读到 0、全部通过检查”的绕过。
+            // 限制：IP 20 次/5 分钟；账号 5 次/5 分钟。
+            if (await rateLimitService.IsLimitedAsync(ipKey, 20, TimeSpan.FromMinutes(5)))
+            {
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
+            }
 
-            // 账号限流检查：同一账号 5 分钟内最多 5 次
-            if (await rateLimitService.GetCountAsync(accountKey) >= 5)
+            if (await rateLimitService.IsLimitedAsync(accountKey, 5, TimeSpan.FromMinutes(5)))
+            {
                 return Results.Json(new ApiResponse(ResultCodes.LoginFail_RateLimited, "登录尝试过于频繁，请稍后再试"), statusCode: 429);
+            }
 
             var device = DeviceInfoFactory.FromRequest(context, locations);
-            var user = await userService.ValidateCredentialsAsync(request.Login, request.Password);
+            var user = await userService.ValidateCredentialsAsync(login, request.Password);
 
             if (user == null)
             {
-                // 登录失败，递增限流计数
-                await rateLimitService.IncrementAsync(ipKey, TimeSpan.FromMinutes(5));
-                await rateLimitService.IncrementAsync(accountKey, TimeSpan.FromMinutes(5));
-
                 await sessionService.LogAsync(new LoginLog
                 {
-                    LoginIdentifier = request.Login,
+                    LoginIdentifier = login,
                     EventType = LoginLogEvents.Login,
                     Success = false,
                     FailReason = "用户名或密码错误",
@@ -178,25 +200,25 @@ public static class AuthEndpoints
                     DeviceName = device.Name
                 });
 
-                return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_UserNotFound, "用户名或密码错误"));
+                return LoginFailureResult(appConfig, 400, ResultCodes.LoginFail_UserNotFound, "用户名或密码错误");
             }
 
             if (user.Status == UserStatus.Deleted)
             {
                 await LogLoginRejectedAsync(sessionService, user, device, "账号不存在或已注销");
-                return Results.NotFound(new ApiResponse(ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销"));
+                return LoginFailureResult(appConfig, 404, ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销");
             }
 
             if (user.Status == UserStatus.Banned)
             {
                 await LogLoginRejectedAsync(sessionService, user, device, "账号已被封禁");
-                return Results.Json(new ApiResponse(ResultCodes.LoginFail_AccountBanned, "账号已被封禁"), statusCode: 403);
+                return LoginFailureResult(appConfig, 403, ResultCodes.LoginFail_AccountBanned, "账号已被封禁");
             }
 
             if (user.Status == UserStatus.Unverified)
             {
                 await LogLoginRejectedAsync(sessionService, user, device, "账号未验证");
-                return Results.BadRequest(new ApiResponse(ResultCodes.LoginFail_AccountUnverified, "账号未验证，请先验证邮箱"));
+                return LoginFailureResult(appConfig, 400, ResultCodes.LoginFail_AccountUnverified, "账号未验证，请先验证邮箱");
             }
 
             // 登录成功，清除此前的失败计数，避免误锁
@@ -219,7 +241,7 @@ public static class AuthEndpoints
             await sessionService.LogAsync(new LoginLog
             {
                 UserId = user.Id,
-                LoginIdentifier = request.Login,
+                LoginIdentifier = login,
                 EventType = LoginLogEvents.Login,
                 Success = true,
                 Ip = device.Ip,
@@ -252,30 +274,28 @@ public static class AuthEndpoints
             var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             var refreshRateLimitKey = $"refresh_ip_{clientIp}";
 
-            if (string.IsNullOrWhiteSpace(request.RefreshToken))
-            {
-                await rateLimitService.IncrementAsync(refreshRateLimitKey, TimeSpan.FromMinutes(1));
-                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "Refresh Token 不能为空"));
-            }
-
             // 检查是否允许登录
             if (!await systemSettingService.GetBoolSettingAsync("allow_login", true))
             {
                 return Results.Json(new ApiResponse(ResultCodes.Forbidden, "系统暂未开放登录"), statusCode: 403);
             }
 
-            // 刷新接口限流：无效 refresh 会触发会话查询，需防止被大量无效请求放大数据库压力。
-            // 仅对无效请求计数；达到阈值后统一返回 429/code=7。
-            if (await rateLimitService.GetCountAsync(refreshRateLimitKey) >= 30)
+            // 刷新接口限流：原子预递增，避免并发请求同时读到旧计数。
+            // 同一 IP 每分钟最多 30 次刷新（含无效令牌），超限返回 429/code=7。
+            if (await rateLimitService.IsLimitedAsync(refreshRateLimitKey, 30, TimeSpan.FromMinutes(1)))
             {
                 return Results.Json(new ApiResponse(ResultCodes.TooManyRequests, "请求过于频繁，请稍后再试"), statusCode: 429);
+            }
+
+            if (string.IsNullOrWhiteSpace(request.RefreshToken))
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "Refresh Token 不能为空"));
             }
 
             var device = DeviceInfoFactory.FromRequest(context, locations);
             var rotated = await sessionService.RotateAsync(request.RefreshToken, device);
             if (rotated == null)
             {
-                await rateLimitService.IncrementAsync(refreshRateLimitKey, TimeSpan.FromMinutes(1));
                 return Results.Json(new ApiResponse(ResultCodes.Unauthorized, "Refresh Token 无效或已过期"), statusCode: 401);
             }
 
@@ -312,7 +332,7 @@ public static class AuthEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.EmailVerifyFail_InvalidToken, "无效的验证链接"));
             }
 
-            var verificationToken = await tokenService.GetVerificationTokenAsync(token);
+            var verificationToken = await tokenService.ConsumeVerificationTokenAsync(token);
 
             if (verificationToken == null)
             {
@@ -330,7 +350,11 @@ public static class AuthEndpoints
             }
 
             // 更新用户状态（仅未验证账号可完成注册验证，防止已封禁/已删除账号被"复活"）
-            var user = verificationToken.User;
+            var user = await userService.GetByIdAsync(verificationToken.UserId);
+            if (user == null)
+            {
+                return Results.NotFound(new ApiResponse(ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销"));
+            }
             if (user.Status == UserStatus.Deleted)
             {
                 return Results.NotFound(new ApiResponse(ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销"));
@@ -344,9 +368,7 @@ public static class AuthEndpoints
             user.EmailVerifiedAt = DateTime.UtcNow;
             await userService.UpdateUserAsync(user);
 
-            // 删除Token
-            await tokenService.DeleteVerificationTokenAsync(verificationToken.Id);
-
+            // Token 已在 ConsumeVerificationTokenAsync 中原子删除（单次使用）
             return Results.Ok(new ApiResponse(ResultCodes.EmailVerifySuccess, "邮箱验证成功"));
         });
 
@@ -359,9 +381,9 @@ public static class AuthEndpoints
             [FromServices] IRateLimitService rateLimitService,
             [FromServices] ILogger<Program> logger) =>
         {
-            // 同一邮箱每分钟最多重发 1 次
+            // 同一邮箱每分钟最多重发 1 次（原子预递增，避免并发绕过）
             var rateLimitKey = $"resend_verification_{request.Email}";
-            if (await rateLimitService.GetCountAsync(rateLimitKey) >= 1)
+            if (await rateLimitService.IsLimitedAsync(rateLimitKey, 1, TimeSpan.FromMinutes(1)))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ResendVerificationFail_RateLimited, "请稍后再试"));
             }
@@ -381,15 +403,13 @@ public static class AuthEndpoints
             var newToken = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
             try
             {
-                await emailService.SendVerificationEmailAsync(user.Email, user.Username, newToken.Token);
+                await emailService.SendVerificationEmailAsync(user.Email, user.Username, newToken.PlainToken);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to send verification email");
                 return Results.BadRequest(new ApiResponse(ResultCodes.EmailSendFail, "邮件发送失败"));
             }
-
-            await rateLimitService.IncrementAsync(rateLimitKey, TimeSpan.FromMinutes(1));
 
             return Results.Ok(new ApiResponse(ResultCodes.ResendVerificationSuccess, "验证邮件已发送"));
         });
@@ -405,7 +425,7 @@ public static class AuthEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailConfirmFail_InvalidToken, "无效的验证链接"));
             }
 
-            var verificationToken = await tokenService.GetVerificationTokenAsync(token);
+            var verificationToken = await tokenService.ConsumeVerificationTokenAsync(token);
 
             if (verificationToken == null)
             {
@@ -433,7 +453,11 @@ public static class AuthEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_EmailExists, "该邮箱已被其他用户使用"));
             }
 
-            var user = verificationToken.User;
+            var user = await userService.GetByIdAsync(verificationToken.UserId);
+            if (user == null)
+            {
+                return Results.NotFound(new ApiResponse(ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销"));
+            }
             if (user.Status == UserStatus.Deleted)
             {
                 return Results.NotFound(new ApiResponse(ResultCodes.LoginFail_AccountDeleted, "账号不存在或已注销"));
@@ -446,8 +470,6 @@ public static class AuthEndpoints
             user.Email = verificationToken.NewEmail;
             user.EmailVerifiedAt = DateTime.UtcNow;
             await userService.UpdateUserAsync(user);
-
-            await tokenService.DeleteVerificationTokenAsync(verificationToken.Id);
 
             return Results.Ok(new ApiResponse(ResultCodes.ChangeEmailConfirmSuccess, "邮箱修改成功"));
         });
@@ -478,6 +500,48 @@ public static class AuthEndpoints
         }).RequireAuthorization().RequirePermission(PermissionCodes.UserLogout);
 
         // ============ 内部辅助 ============
+
+        // 统一认证失败响应：不泄露账号是否存在/封禁/未验证；旧客户端可通过 Security:UniformAuthErrors=false 恢复精确错误码。
+        // 使用 400 而不是 401：管理前端 UcsApiClient 会把 401 当作“会话失效”触发刷新/跳转，
+        // 而这里的失败是凭据错误，不需要走会话恢复流程。
+        static IResult LoginFailureResult(AppConfiguration appConfig, int legacyStatus, int legacyCode, string legacyMessage)
+        {
+            if (appConfig.Security.UniformAuthErrors)
+            {
+                return Results.Json(new ApiResponse(ResultCodes.LoginFail_UserNotFound, "账号或密码错误"), statusCode: 400);
+            }
+
+            return Results.Json(new ApiResponse(legacyCode, legacyMessage), statusCode: legacyStatus);
+        }
+
+        // 注册重复用户名/邮箱时返回与成功一致的通用响应，避免账号枚举。
+        // 同时向该邮箱发送一条“注册尝试”通知：既提醒邮箱所有者，也让 SMTP 成功/失败
+        // 对真实注册与重复注册产生相同的响应表现，避免通过“验证邮件发送失败”差异做枚举。
+        static async Task<IResult> DuplicateRegistrationResultAsync(
+            IEmailService emailService, ILogger<Program> logger, string email)
+        {
+            var emailSent = true;
+            try
+            {
+                await emailService.SendEmailAsync(
+                    email,
+                    "注册请求提醒",
+                    "<p>有人尝试使用该邮箱注册账号。若这不是您本人操作，请忽略本邮件；" +
+                    "如已有账号，可直接登录或使用“忘记密码”重置口令。</p>");
+            }
+            catch (Exception ex)
+            {
+                emailSent = false;
+                logger.LogWarning(ex, "Failed to send duplicate-registration notice email");
+            }
+
+            var message = emailSent
+                ? "注册成功，请查收验证邮件"
+                : "注册成功，但验证邮件发送失败，请稍后重新发送验证邮件";
+
+            return Results.Ok(new ApiResponse(ResultCodes.RegisterSuccess, message,
+                new RegisterDataResponse(email, emailSent)));
+        }
 
         // 被拒登录的审计记录：写失败不影响返回
         static Task LogLoginRejectedAsync(ISessionService sessionService, User user, DeviceInfo device, string reason)
