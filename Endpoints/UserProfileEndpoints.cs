@@ -620,6 +620,7 @@ public static class UserProfileEndpoints
             [FromServices] IUserService userService,
             [FromServices] ITokenService tokenService,
             [FromServices] IEmailService emailService,
+            [FromServices] IRateLimitService rateLimitService,
             HttpContext httpContext,
             [FromServices] ILogger<Program> logger) =>
         {
@@ -656,6 +657,16 @@ public static class UserProfileEndpoints
             if (await userService.ActiveEmailExistsAsync(newEmail))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ChangeEmailRequestFail_EmailExists, "该邮箱已被使用"));
+            }
+
+            // 与重发验证接口对齐：同一目标邮箱 1 分钟 1 次，同一用户 10 分钟最多 5 次，
+            // 防止已登录用户反复触发验证邮件（每次仍需通过密码校验）。
+            if (await rateLimitService.IsLimitedAsync(
+                    $"change_email_user_{id}", 5, TimeSpan.FromMinutes(10)) ||
+                await rateLimitService.IsLimitedAsync(
+                    $"change_email_target_{newEmail.ToLowerInvariant()}", 1, TimeSpan.FromMinutes(1)))
+            {
+                return Results.Json(new ApiResponse(ResultCodes.TooManyRequests, "请求过于频繁，请稍后再试"), statusCode: 429);
             }
 
             var tokenIssue = await tokenService.CreateVerificationTokenAsync(

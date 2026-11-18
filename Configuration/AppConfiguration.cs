@@ -31,7 +31,7 @@ public static class AppInfo
             return informational.StartsWith('v') ? informational : "v" + informational;
         }
 
-        return "v1.5.0";
+        return "v1.5.1";
     }
 }
 

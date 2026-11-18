@@ -36,20 +36,6 @@ public class TokenService : ITokenService
     private static string HashVerificationToken(string token)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 
-    public async Task<EmailVerificationToken?> GetVerificationTokenAsync(string token)
-    {
-        if (string.IsNullOrWhiteSpace(token))
-        {
-            return null;
-        }
-
-        var tokenHash = HashVerificationToken(token);
-
-        return await _context.EmailVerificationTokens
-            .Include(t => t.User)
-            .FirstOrDefaultAsync(t => t.Token == tokenHash);
-    }
-
     public async Task<EmailVerificationToken?> ConsumeVerificationTokenAsync(string token)
     {
         if (string.IsNullOrWhiteSpace(token))
@@ -101,16 +87,6 @@ public class TokenService : ITokenService
         await _context.SaveChangesAsync();
 
         return new VerificationTokenIssue(token, plainToken);
-    }
-
-    public async Task DeleteVerificationTokenAsync(ulong tokenId)
-    {
-        var token = await _context.EmailVerificationTokens.FindAsync(tokenId);
-        if (token != null)
-        {
-            _context.EmailVerificationTokens.Remove(token);
-            await _context.SaveChangesAsync();
-        }
     }
 
     public async Task DeleteExpiredTokensAsync()

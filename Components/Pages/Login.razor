@@ -44,6 +44,40 @@
                     }
                 </button>
             </form>
+
+            <div class="ucs-login-hint">
+                账号未验证？
+                <button type="button" class="ucs-login-link" @onclick="ToggleResend">重新发送验证邮件</button>
+            </div>
+
+            @if (_showResend)
+            {
+                <div class="ucs-login-resend">
+                    <div class="ucs-field">
+                        <label class="ucs-field-label" for="ucs-resend-email">注册邮箱</label>
+                        <Input Id="ucs-resend-email" @bind-Value="_resendEmail" Placeholder="注册时使用的邮箱" Disabled="_resending" />
+                    </div>
+
+                    @if (!string.IsNullOrEmpty(_resendMessage))
+                    {
+                        <UcsNotice Kind="@(_resendError ? "error" : "success")"
+                                   Message="@_resendMessage"
+                                   OnDismiss="@(() => _resendMessage = null)" />
+                    }
+
+                    <button type="button" class="ucs-login-submit" @onclick="ResendAsync" disabled="@_resending">
+                        @if (_resending)
+                        {
+                            <span class="ucs-spinner" aria-hidden="true"></span>
+                            <span>发送中…</span>
+                        }
+                        else
+                        {
+                            <span>发送验证邮件</span>
+                        }
+                    </button>
+                </div>
+            }
         </div>
     </div>
 </div>
@@ -58,6 +92,12 @@
     private string? _error;
     private bool _submitting;
     private bool _sessionExpired;
+
+    private bool _showResend;
+    private string _resendEmail = string.Empty;
+    private string? _resendMessage;
+    private bool _resendError;
+    private bool _resending;
 
     /// <summary>登录页标题：显示站点信息中的站点名称（获取失败时回落到默认标题）。</summary>
     private string _siteName = "UCS 管理控制台";
@@ -81,6 +121,51 @@
         catch
         {
             // 站点信息不可用时保留默认标题，不影响登录
+        }
+    }
+
+    private void ToggleResend()
+    {
+        _resendMessage = null;
+        if (string.IsNullOrWhiteSpace(_resendEmail))
+        {
+            _resendEmail = _account.Trim();
+        }
+        _showResend = !_showResend;
+    }
+
+    private async Task ResendAsync()
+    {
+        if (_resending)
+        {
+            return;
+        }
+
+        var email = _resendEmail.Trim();
+        if (email.Length == 0)
+        {
+            _resendMessage = "请输入注册邮箱";
+            _resendError = true;
+            return;
+        }
+
+        _resending = true;
+        _resendMessage = null;
+        _resendError = false;
+        try
+        {
+            var result = await Api.PostAsync<object>("/api/users/resend-verification", new { email });
+            _resendMessage = result.Message;
+            _resendError = !result.Success;
+        }
+        catch (Exception ex)
+        {
+            _resendMessage = $"发送失败：{ex.Message}";
+            _resendError = true;
+        }
+        finally
+        {
+            _resending = false;
         }
     }
 

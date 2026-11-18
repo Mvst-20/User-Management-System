@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- 版本号统一来源：启动横幅、/api/admin/server/status 与发布说明 -->
-    <Version>1.5.0</Version>
+    <Version>1.5.1</Version>
     <!-- EF Core 和 Data Annotations 不完全兼容 trimming，抑制相关警告 -->
     <NoWarn>$(NoWarn);IL3050;IL2026</NoWarn>
   </PropertyGroup>

@@ -65,10 +65,8 @@ public static class AuthEndpoints
             {
                 if (appConfig.Security.UniformAuthErrors)
                 {
-                    // 不泄露用户名是否已存在；发送通用通知并返回与真实注册一致的响应，
-                    // SMTP 成功/失败的表现也与真实注册相同，避免通过响应差异枚举账号。
                     PasswordHasher.VerifyDummy(request.Password);
-                    return await DuplicateRegistrationResultAsync(emailService, logger, email);
+                    return UniformRegistrationAccepted();
                 }
 
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_UsernameExists, "用户名已存在"));
@@ -80,7 +78,7 @@ public static class AuthEndpoints
                 if (appConfig.Security.UniformAuthErrors)
                 {
                     PasswordHasher.VerifyDummy(request.Password);
-                    return await DuplicateRegistrationResultAsync(emailService, logger, email);
+                    return UniformRegistrationAccepted();
                 }
 
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "邮箱已被注册"));
@@ -103,7 +101,13 @@ public static class AuthEndpoints
             }
             catch (DbUpdateException ex) when (ex.InnerException is MySqlConnector.MySqlException mysqlEx && mysqlEx.ErrorCode == MySqlConnector.MySqlErrorCode.DuplicateKeyEntry)
             {
-                // 并发注册导致唯一键冲突，返回友好提示
+                // 并发注册导致唯一键冲突：统一模式下必须返回与成功/重复注册一致的响应，
+                // 否则攻击者可通过“极窄时间窗”区分账号是否已存在。
+                if (appConfig.Security.UniformAuthErrors)
+                {
+                    return UniformRegistrationAccepted();
+                }
+
                 return Results.BadRequest(new ApiResponse(ResultCodes.RegisterFail_EmailExists, "该用户名或邮箱已被注册"));
             }
 
@@ -133,6 +137,13 @@ public static class AuthEndpoints
             var message = emailSent
                 ? "注册成功，请查收验证邮件"
                 : "注册成功，但验证邮件发送失败，请稍后重新发送验证邮件";
+
+            // 统一模式下不暴露 emailSent / SMTP 成功失败，也不暴露账号是否存在；
+            // 真实发送结果只写服务端日志，避免重复注册通知邮件与验证邮件的差异成为枚举面。
+            if (appConfig.Security.UniformAuthErrors)
+            {
+                return UniformRegistrationAccepted();
+            }
 
             return Results.Ok(new ApiResponse(ResultCodes.RegisterSuccess, message,
                 new RegisterDataResponse(user.Email, emailSent)));
@@ -379,16 +390,45 @@ public static class AuthEndpoints
             [FromServices] ITokenService tokenService,
             [FromServices] IEmailService emailService,
             [FromServices] IRateLimitService rateLimitService,
+            [FromServices] AppConfiguration appConfig,
             [FromServices] ILogger<Program> logger) =>
         {
+            var email = (request.Email ?? string.Empty).Trim();
+            if (email.Length == 0)
+            {
+                return Results.BadRequest(new ApiResponse(ResultCodes.ValidationError, "邮箱不能为空"));
+            }
+
             // 同一邮箱每分钟最多重发 1 次（原子预递增，避免并发绕过）
-            var rateLimitKey = $"resend_verification_{request.Email}";
+            var rateLimitKey = $"resend_verification_{email.ToLowerInvariant()}";
             if (await rateLimitService.IsLimitedAsync(rateLimitKey, 1, TimeSpan.FromMinutes(1)))
             {
                 return Results.BadRequest(new ApiResponse(ResultCodes.ResendVerificationFail_RateLimited, "请稍后再试"));
             }
 
-            var user = await userService.GetByEmailAsync(request.Email);
+            var user = await userService.GetByEmailAsync(email);
+
+            if (appConfig.Security.UniformAuthErrors)
+            {
+                // 未知邮箱、已删除、已验证、未验证都返回同一个响应；
+                // 仅“未验证”账号实际发送邮件，发送失败也只写日志，不通过响应暴露账号状态。
+                if (user is { Status: UserStatus.Unverified })
+                {
+                    try
+                    {
+                        var newToken = await tokenService.CreateVerificationTokenAsync(
+                            user.Id, VerificationTokenType.Registration);
+                        await emailService.SendVerificationEmailAsync(user.Email, user.Username, newToken.PlainToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Failed to resend verification email");
+                    }
+                }
+
+                return Results.Ok(new ApiResponse(ResultCodes.ResendVerificationSuccess,
+                    "如果该邮箱需要验证，验证邮件将发送"));
+            }
 
             if (user == null)
             {
@@ -400,10 +440,10 @@ public static class AuthEndpoints
                 return Results.BadRequest(new ApiResponse(ResultCodes.ResendVerificationFail_AlreadyVerified, "该用户无需验证"));
             }
 
-            var newToken = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
+            var legacyToken = await tokenService.CreateVerificationTokenAsync(user.Id, VerificationTokenType.Registration);
             try
             {
-                await emailService.SendVerificationEmailAsync(user.Email, user.Username, newToken.PlainToken);
+                await emailService.SendVerificationEmailAsync(user.Email, user.Username, legacyToken.PlainToken);
             }
             catch (Exception ex)
             {
@@ -514,34 +554,11 @@ public static class AuthEndpoints
             return Results.Json(new ApiResponse(legacyCode, legacyMessage), statusCode: legacyStatus);
         }
 
-        // 注册重复用户名/邮箱时返回与成功一致的通用响应，避免账号枚举。
-        // 同时向该邮箱发送一条“注册尝试”通知：既提醒邮箱所有者，也让 SMTP 成功/失败
-        // 对真实注册与重复注册产生相同的响应表现，避免通过“验证邮件发送失败”差异做枚举。
-        static async Task<IResult> DuplicateRegistrationResultAsync(
-            IEmailService emailService, ILogger<Program> logger, string email)
-        {
-            var emailSent = true;
-            try
-            {
-                await emailService.SendEmailAsync(
-                    email,
-                    "注册请求提醒",
-                    "<p>有人尝试使用该邮箱注册账号。若这不是您本人操作，请忽略本邮件；" +
-                    "如已有账号，可直接登录或使用“忘记密码”重置口令。</p>");
-            }
-            catch (Exception ex)
-            {
-                emailSent = false;
-                logger.LogWarning(ex, "Failed to send duplicate-registration notice email");
-            }
-
-            var message = emailSent
-                ? "注册成功，请查收验证邮件"
-                : "注册成功，但验证邮件发送失败，请稍后重新发送验证邮件";
-
-            return Results.Ok(new ApiResponse(ResultCodes.RegisterSuccess, message,
-                new RegisterDataResponse(email, emailSent)));
-        }
+        // 统一模式下的注册响应：无论用户名/邮箱是否已存在、SMTP 是否成功，
+        // 都返回完全一致的 200/code=100，不包含 emailSent 等可区分字段。
+        static IResult UniformRegistrationAccepted()
+            => Results.Ok(new ApiResponse(ResultCodes.RegisterSuccess,
+                "注册请求已受理，如果信息可用，系统将发送验证邮件"));
 
         // 被拒登录的审计记录：写失败不影响返回
         static Task LogLoginRejectedAsync(ISessionService sessionService, User user, DeviceInfo device, string reason)

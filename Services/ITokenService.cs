@@ -7,9 +7,6 @@ public sealed record VerificationTokenIssue(EmailVerificationToken Token, string
 
 public interface ITokenService
 {
-    /// <summary>按明文 Token 查询（内部先做 SHA-256 哈希，再与库中哈希比对）。</summary>
-    Task<EmailVerificationToken?> GetVerificationTokenAsync(string token);
-
     /// <summary>
     /// 原子消费验证 Token：查询后以“按 Id 删除且影响行数为 1”作为单次使用判定。
     /// 并发提交同一 Token 时只有一个请求能成功。
@@ -23,6 +20,5 @@ public interface ITokenService
     Task<VerificationTokenIssue> CreateVerificationTokenAsync(
         ulong userId, VerificationTokenType type, string? newEmail = null);
 
-    Task DeleteVerificationTokenAsync(ulong tokenId);
     Task DeleteExpiredTokensAsync();
 }

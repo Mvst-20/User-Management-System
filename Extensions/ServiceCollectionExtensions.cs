@@ -1,5 +1,7 @@
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
+using System.Threading;
 using AntDesign;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -27,6 +29,24 @@ namespace UserManagementSystem.Extensions;
 /// </summary>
 public static class ServiceCollectionExtensions
 {
+    /// <summary>标记本次认证失败的原因是“认证状态不可用”（数据库故障/超时），用于返回 503 而不是 401。</summary>
+    private const string AuthStateUnavailableItemKey = "ucs.auth.state_unavailable";
+
+    /// <summary>认证状态不可用的告警节流：数据库长时间故障时避免每个请求写一条日志。</summary>
+    private static long _lastAuthStateFailureLogTicks;
+
+    private static bool ShouldLogAuthStateFailure()
+    {
+        var now = DateTime.UtcNow.Ticks;
+        var last = Interlocked.Read(ref _lastAuthStateFailureLogTicks);
+        if (now - last < TimeSpan.FromSeconds(30).Ticks)
+        {
+            return false;
+        }
+
+        return Interlocked.CompareExchange(ref _lastAuthStateFailureLogTicks, now, last) == last;
+    }
+
     /// <summary>
     /// 绑定强类型配置并执行启动校验（配置缺失/非法时快速失败）。
     /// </summary>
@@ -338,18 +358,42 @@ public static class ServiceCollectionExtensions
                     {
                         // 认证状态无法验证时必须 fail-closed：数据库校验超时说明黑名单/会话/用户状态
                         // 都未确认，不能放行，否则已撤销的令牌在数据库故障期间仍可访问受保护接口。
-                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
-                        logger.LogError("鉴权阶段的数据库校验超时（3s），拒绝认证");
+                        context.HttpContext.Items[AuthStateUnavailableItemKey] = true;
+                        if (ShouldLogAuthStateFailure())
+                        {
+                            var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+                            logger.LogWarning("鉴权阶段的数据库校验超时（3s），拒绝认证（后续同类告警 30 秒内节流）");
+                        }
                         context.Fail("Authentication state unavailable");
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         // 数据库整体不可用（连接中断、重试耗尽）时同样 fail-closed。
                         // 健康检查 /health 仍保持匿名可用，用于存活探测；受保护 API 不做降级放行。
-                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
-                        logger.LogError(ex, "鉴权阶段的数据库校验失败，拒绝认证");
+                        context.HttpContext.Items[AuthStateUnavailableItemKey] = true;
+                        if (ShouldLogAuthStateFailure())
+                        {
+                            var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+                            logger.LogWarning(ex, "鉴权阶段的数据库校验失败，拒绝认证（后续同类告警 30 秒内节流）");
+                        }
                         context.Fail("Authentication state unavailable");
                     }
+                },
+                OnChallenge = async context =>
+                {
+                    // 数据库故障导致的“无法确认认证状态”返回 503，而不是 401：
+                    // 401 会被管理前端当作会话失效并清空登录态，数据库恢复后还要重新登录。
+                    if (!context.HttpContext.Items.ContainsKey(AuthStateUnavailableItemKey))
+                    {
+                        return; // 其他认证失败保持默认 401 行为
+                    }
+
+                    context.HandleResponse();
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    context.Response.Headers.RetryAfter = "5";
+                    context.Response.ContentType = "application/json; charset=utf-8";
+                    await context.Response.WriteAsync(JsonSerializer.Serialize(
+                        new ApiResponse(ResultCodes.InternalServerError, "认证状态暂不可用，请稍后重试")));
                 }
             };
         })

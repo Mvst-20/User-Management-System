@@ -1,6 +1,6 @@
 # UCS 业务系统接入指南
 
-> 版本：v1.5.0 | 最后更新：2026-09-15（权限组新增「基本用户权限」`isDefaultForNewUsers`，注册时自动加入；`GET /api/users/me/permissions` 新增返回 `level`；补全内置权限代码与端点清单）
+> 版本：v1.5.1 | 最后更新：2026-11-19（统一认证失败响应、邮箱验证 Token 单次使用、认证 fail-closed 返回 503、补充限流与故障重试说明）
 
 ---
 
@@ -136,26 +136,31 @@ Content-Type: application/json
 }
 ```
 
-成功响应：
+成功响应（`Security:UniformAuthErrors=true`，默认）：
 
 ```json
 {
   "code": 100,
-  "message": "注册成功，请查收验证邮件",
-  "data": {
-    "email": "zhangsan@example.com",
-    "emailSent": true
-  }
+  "message": "注册请求已受理，如果信息可用，系统将发送验证邮件",
+  "data": null
 }
 ```
 
-> 注册后需验证邮箱才能登录，系统会自动发送验证邮件。
+> 统一模式下，用户名/邮箱已存在与全新注册返回**完全一致**的响应，且不返回 `emailSent`；
+> 服务端只对真正创建的账号发送验证邮件。需要旧版 `101`/`102` 精确错误码时，部署方设置
+> `Security:UniformAuthErrors=false`，此时响应包含 `data: { email, emailSent }`。
+
+> 注册后需验证邮箱才能登录；验证邮件中的 Token 在数据库中仅保存 SHA-256 哈希，且只能使用一次。
 
 #### 邮箱验证
 
 ```
 GET /api/users/verify-email?token=<验证链接中的token>
 ```
+
+> Token 单次使用：验证成功后再使用同一链接会返回 `code=301`（无效链接），需要重新发起验证。
+> 重发接口：`POST /api/users/resend-verification { "email": "..." }`，同邮箱 1 分钟 1 次。
+> 在统一模式下，未知邮箱、已验证、未验证都返回同一个 `200 / code=310` 响应，只有未验证账号实际发送邮件。
 
 #### 登录
 
@@ -202,8 +207,16 @@ Content-Type: application/json
 > 同一类设备再次登录会顶掉该设备上更早的会话（`replaced_by_new_device`），其他设备不受影响。
 > 因此**不要**在客户端把「登录成功」当成「其他端已下线」。
 
-> **登录失败次数**：同一 IP 5 分钟内失败 20 次、或同一账号 5 分钟内失败 5 次会被临时限流（HTTP 429）；
-> 登录成功会立即清零计数。详见 [8. 速率限制](#8-速率限制)。
+> **登录失败次数**：同一 IP 5 分钟内 20 次、或同一账号 5 分钟内 5 次会被临时限流（HTTP 429；
+> `code=205`）。限流在密码校验前**原子递增**，并发请求不能绕过；登录成功会立即清零计数。
+> 详见 [8. 速率限制](#8-速率限制)。
+
+> **登录失败响应**：`Security:UniformAuthErrors=true`（默认）时，用户不存在、密码错误、已删除、
+> 已封禁、未验证均返回相同的 `HTTP 400 / code=201 / "账号或密码错误"`，避免账户枚举。
+> 需要旧版 `203`/`204`/`207` 精确错误码时设置 `false`。
+>
+> **数据库故障**：认证状态无法确认时返回 `HTTP 503`（`Retry-After: 5`，`code=6`），
+> 而不是 401；客户端应保留本地会话并稍后重试，不要按“登录失效”清空 Token。
 
 #### 刷新 Token（避免频繁登录）
 
@@ -252,6 +265,8 @@ Refresh 过期 ──► 需重新登录
 2. 每次请求前检查 Access Token 是否即将过期（如剩余 < 5 分钟）
 3. 若即将过期，调用 `/api/users/refresh` 刷新
 4. 请求返回 401 时，尝试刷新；刷新失败则跳转登录页
+5. 请求返回 **503**（`code=6`，认证状态暂不可用）时，保留当前 Token 并按 `Retry-After` 重试；
+   不要当作登录失效清空会话，数据库恢复后原 Token 可继续使用
 
 ### 3.4 多设备会话
 
@@ -505,6 +520,8 @@ GET /api/users/verify-email-change?token=<验证链接中的token>
 ```
 
 > 仅在确认后才真正切换邮箱，且要求该邮箱未被其他用户占用（`code=402`）。
+> 该接口同样限流：同一用户 10 分钟最多 5 次，同一目标邮箱 1 分钟最多 1 次；超限返回 429 / `code=7`。
+> 验证链接中的 Token 为单次使用。
 
 #### 删除用户（软删除）
 
@@ -1117,8 +1134,11 @@ curl -X PUT https://api.example.com/api/subsystems/self/permissions \
 | 3 | 未授权（Token无效或缺失） |
 | 4 | 禁止访问 |
 | 5 | 资源不存在 |
-| 6 | 服务器内部错误 |
+| 6 | 服务器内部错误（认证状态不可用时的 HTTP 503 也使用该 code） |
 | 7 | 请求过于频繁 |
+
+> 数据库故障导致认证状态无法确认时返回 **HTTP 503**（`code=6`，`Retry-After: 5`）；
+> 客户端应保留当前 Token 并重试，不要按 401 处理清空会话。
 
 ### 权限相关
 
@@ -1135,15 +1155,15 @@ curl -X PUT https://api.example.com/api/subsystems/self/permissions \
 
 | code | 含义 |
 |------|------|
-| 100 | 注册成功 |
-| 101 | 用户名已存在 |
-| 102 | 邮箱已被注册 |
+| 100 | 注册成功（统一模式下重复注册也返回该响应） |
+| 101 | 用户名已存在（仅 `Security:UniformAuthErrors=false`） |
+| 102 | 邮箱已被注册（仅 `Security:UniformAuthErrors=false`） |
 | 200 | 登录成功 |
-| 201 | 用户名或密码错误 |
-| 203 | 账号已注销 |
-| 204 | 账号已被封禁 |
+| 201 | 用户名或密码错误（统一模式下也用于已删除/封禁/未验证） |
+| 203 | 账号已注销（仅 `Security:UniformAuthErrors=false`） |
+| 204 | 账号已被封禁（仅 `Security:UniformAuthErrors=false`） |
 | 205 | 登录尝试过于频繁 |
-| 207 | 账号未验证邮箱 |
+| 207 | 账号未验证邮箱（仅 `Security:UniformAuthErrors=false`） |
 | 616 | 用户状态仅可由管理员修改 / 不支持的状态值 |
 | 617 | 目标用户/权限组的权限级别不低于操作者，拒绝操作 |
 
@@ -1155,16 +1175,19 @@ curl -X PUT https://api.example.com/api/subsystems/self/permissions \
 
 | 接口 | 限制策略 |
 |------|----------|
-| `/api/users/login` | 同 IP 5 分钟 20 次；同账号 5 分钟 5 次 |
+| `/api/users/login` | 同 IP 5 分钟 20 次；同账号 5 分钟 5 次（密码校验前原子递增） |
 | `/api/users/register` | 同邮箱 1 分钟 5 次 |
-| `/api/users/resend-verification` | 同邮箱 1 分钟 1 次 |
+| `/api/users/resend-verification` | 同邮箱 1 分钟 1 次（超限 `400 / code=311`） |
+| `/api/users/refresh` | 同 IP 1 分钟 30 次 |
+| `POST /api/users/{id}/change-email` | 同用户 10 分钟 5 次；同目标邮箱 1 分钟 1 次 |
+| `POST /api/users/{id}/avatar` | 同用户 1 小时 20 次 |
 
-超限时返回 HTTP 429，`code` 为 `7`。
+超限时通常返回 HTTP 429，`code=7`；`resend-verification` 使用 `400 / code=311`。
 
 > 限流计数存储在数据库（`rate_limit_entries` 表），多实例部署时全局限流窗口自动共享。
 >
-> **计数清零**：仅在**登录失败**时累积计数；**登录成功后**该 IP 与账号的失败计数会被立即清零，
-> 因此正常用户的偶发输错密码不会累积到触发锁定。
+> **计数清零**：登录限流在密码校验前递增（因此并发请求无法同时读到旧计数），
+> **登录成功后**该 IP 与账号的计数会被立即清零，正常用户的偶发输错密码不会累积到触发锁定。
 
 ---
 
